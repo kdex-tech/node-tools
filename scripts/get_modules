@@ -2,14 +2,26 @@
 
 set -e
 
-cp /scripts/package.json ${WORKDIR}/package.json
+echo "--- Starting get_modules ---"
 
-cd ${WORKDIR}
+if [ -z "${WORKDIR}" ]; then
+  echo "Error: WORKDIR environment variable is not set."
+  exit 1
+fi
 
-echo "======== package.json ========="
+mkdir -p "${WORKDIR}"
+cp /scripts/package.json "${WORKDIR}/package.json"
+
+cd "${WORKDIR}"
+
+echo "--- Current package.json ---"
 cat package.json
-printf "\n===============================\n"
+echo "\n--------------------------"
 
-npm install
+echo "--- Installing dependencies ---"
+npm install --no-audit --no-fund
 
+echo "--- Optimizing node_modules ---"
 optimize
+
+echo "--- get_modules completed successfully ---"

@@ -6,8 +6,8 @@
   "author": "KDex Tech Inc.",
   "type": "module",
   "bin": {
-    "generate": "./generate.js",
-    "optimize": "./optimize.js"
+    "generate": "./generate",
+    "optimize": "./optimize"
   },
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1"

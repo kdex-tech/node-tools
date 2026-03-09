@@ -2,12 +2,38 @@
 
 set -e
 
-cp /scripts/generate.js ${WORKDIR}/generate.js
+echo "--- Starting importmap_generator ---"
 
-cd ${WORKDIR}
+if [ -z "${WORKDIR}" ]; then
+  echo "Error: WORKDIR environment variable is not set."
+  exit 1
+fi
 
+if [ -z "${PACKAGING_DIR}" ]; then
+  echo "Error: PACKAGING_DIR environment variable is not set."
+  exit 1
+fi
+
+if [ -z "${MODULE_PATH}" ]; then
+  echo "Setting default MODULE_PATH to /node_modules"
+  export MODULE_PATH="/node_modules"
+fi
+
+mkdir -p "${PACKAGING_DIR}"
+
+cd "${WORKDIR}"
+
+echo "--- Generating importmap.json ---"
 generate
 
-cp importmap.json ${PACKAGING_DIR}/importmap.json
+echo "--- Distributing generated importmap.json ---"
+cp importmap.json "${PACKAGING_DIR}/importmap.json"
 
-cat importmap.json > /dev/termination-log
+# Write to termination log as requested if writeable
+if [ -w /dev/termination-log ]; then
+  cat importmap.json > /dev/termination-log
+else
+  echo "--- Skipping /dev/termination-log (not writeable) ---"
+fi
+
+echo "--- importmap_generator completed successfully ---"

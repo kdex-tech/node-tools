@@ -1,13 +1,12 @@
-#!/usr/bin/env node
-
 import { build } from 'esbuild';
 import fs from 'fs';
 import path from 'path';
 
-async function run() {
+export async function optimize(targetDir = 'node_modules') {
     const files = [];
 
     function walk(dir) {
+        if (!fs.existsSync(dir)) return;
         const list = fs.readdirSync(dir);
         for (const file of list) {
             const fullPath = path.join(dir, file);
@@ -28,11 +27,13 @@ async function run() {
         }
     }
 
-    console.log('--- Discovering source files in node_modules ---');
-    if (!fs.existsSync('node_modules')) {
-        console.log('node_modules not found, skipping optimization.');
+    console.log(`--- Discovering source files in ${targetDir} ---`);
+    if (!fs.existsSync(targetDir)) {
+        console.log(`${targetDir} not found, skipping optimization.`);
         return;
     }
+
+    walk(targetDir);
 
     const uniqueFiles = Array.from(new Set(files));
     console.log('Found ' + uniqueFiles.length + ' unique files to optimize.');
@@ -51,13 +52,7 @@ async function run() {
             });
         } catch (e) {
             console.error("Failed to optimize " + file + ": " + e.message);
-            // We allow individual failures but report them
         }
     }
     console.log("--- Optimization complete ---");
 }
-
-run().catch(err => {
-    console.error("Optimization runner failed:", err);
-    process.exit(1);
-});

@@ -1,0 +1,12 @@
+#!/usr/bin/env node
+
+import { optimize } from './optimize.js';
+
+async function run() {
+    await optimize('node_modules');
+}
+
+run().catch(err => {
+    console.error("Optimization runner failed:", err);
+    process.exit(1);
+});

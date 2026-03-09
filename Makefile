@@ -47,7 +47,8 @@ help: ## Display this help.
 
 .PHONY: test
 test: ## Run all tests
-	@echo "This repo has no tests, yet ..."
+	@echo "Running tests..."
+	./scripts/utils/test/integration.sh
 
 # If you wish to build the manager image targeting other platforms you can use the --platform flag.
 # (i.e. docker build --platform linux/arm64). However, you must enable docker buildKit for it.
