@@ -39,6 +39,7 @@ jobs:
       with:
         node-version: 24
         cache: 'npm'
+        cache-dependency-path: scripts/utils/package-lock.json
 
     - name: Run Tests
       shell: bash
