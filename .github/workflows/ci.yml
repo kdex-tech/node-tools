@@ -34,6 +34,10 @@ jobs:
     - name: Clone the code
       uses: actions/checkout@v6
 
+    - name: Run Tests
+      shell: bash
+      run: make test
+
     - name: Publish Docker Image
       if: ${{ env.PUBLISH == 'true' }}
       uses: ./.github/actions/publish-docker-image
