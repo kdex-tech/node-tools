@@ -1,0 +1,19 @@
+{
+  "name": "utils",
+  "version": "1.0.0",
+  "description": "Utilities for the KDex ES Modules Packager",
+  "license": "Apache-2.0",
+  "author": "KDex Tech Inc.",
+  "type": "module",
+  "bin": {
+    "generate": "./generate.js",
+    "optimize": "./optimize.js"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "dependencies": {
+    "@jspm/generator": "^2.11.0",
+    "esbuild": "^0.27.3"
+  }
+}

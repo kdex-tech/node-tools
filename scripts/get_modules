@@ -1,0 +1,15 @@
+#!/bin/sh
+
+set -e
+
+cp /scripts/package.json ${WORKDIR}/package.json
+
+cd ${WORKDIR}
+
+echo "======== package.json ========="
+cat package.json
+printf "\n===============================\n"
+
+npm install
+
+optimize

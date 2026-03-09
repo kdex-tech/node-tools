@@ -1,0 +1,13 @@
+#!/bin/sh
+
+set -e
+
+cp /scripts/generate.js ${WORKDIR}/generate.js
+
+cd ${WORKDIR}
+
+generate
+
+cp importmap.json ${PACKAGING_DIR}/importmap.json
+
+cat importmap.json > /dev/termination-log

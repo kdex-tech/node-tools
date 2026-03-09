@@ -1,0 +1,19 @@
+name: 'Publish Docker Image'
+description: 'Publish Docker Image'
+
+runs:
+  using: "composite"
+  steps:
+
+  - name: Log in to registry with Docker
+    shell: bash
+    run: |
+      echo "${{ github.token }}" | docker login ghcr.io/${{ github.repository }} -u ${{ github.actor }} --password-stdin
+
+  - name: Push image
+    shell: bash
+    run: |
+      export REPOSITORY=ghcr.io
+      export IMG=$(echo ${{ github.repository }} | tr '[A-Z]' '[a-z]')
+      export TAG=$(echo ${{ github.ref }} | sed -e 's,.*/v\(.*\),\1,')
+      make docker-buildx
