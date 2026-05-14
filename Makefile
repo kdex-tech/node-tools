@@ -57,7 +57,7 @@ docker-buildx: ## Build and push docker image for the manager for cross-platform
 docker-push: ## Push docker image with the manager.
 	$(CONTAINER_TOOL) push ${REPOSITORY}${IMG}${TAG}
 
-PLATFORMS ?= linux/arm64,linux/amd64,linux/s390x,linux/ppc64le
+PLATFORMS ?= linux/arm64,linux/amd64
 
 .PHONY: test
 test: scripts/utils/node_modules ## Run all tests
