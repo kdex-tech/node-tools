@@ -17,7 +17,7 @@
 // for every file we rewrote so the integrity map stays consistent.
 
 import { init as initCjsLexer, parse as parseCjs } from 'cjs-module-lexer';
-import { build } from 'esbuild';
+import { build, transformSync } from 'esbuild';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -155,6 +155,15 @@ function collectNamedExportsRecursive(absPath, visited) {
     } catch {
         return [];
     }
+    // The `optimize` step in get_modules runs esbuild with bundle:false +
+    // define { NODE_ENV: production } over every file. That substitutes
+    // process.env.NODE_ENV but leaves the resulting `if (true) { ... } else
+    // { ... }` intact - cjs-module-lexer doesn't follow dead branches and
+    // returns zero reexports for the canonical React wrapper. Run the body
+    // through esbuild's transform with tree-shaking + minifySyntax to drop
+    // the dead `else` so the lexer sees the surviving `module.exports =
+    // require('./x')` cleanly.
+    body = simplifyForLex(body);
     let lex;
     try {
         lex = parseCjs(body);
@@ -176,6 +185,26 @@ function collectNamedExportsRecursive(absPath, visited) {
         }
     }
     return [...seen];
+}
+
+// Pre-process a CJS body into a form cjs-module-lexer can read past dead
+// branches. esbuild's transform with treeShaking + minifySyntax collapses
+// `if (true) { A } else { B }` to `A` and `if (false) ...` to nothing while
+// still emitting CJS - cheap, in-memory, no file I/O.
+function simplifyForLex(body) {
+    try {
+        const out = transformSync(body, {
+            loader: 'js',
+            format: 'cjs',
+            treeShaking: true,
+            minifySyntax: true,
+            define: { 'process.env.NODE_ENV': '"production"' },
+            logLevel: 'silent',
+        });
+        return out.code;
+    } catch {
+        return body;
+    }
 }
 
 // Resolve a `require(...)` spec the way Node does for CJS. Only handles
