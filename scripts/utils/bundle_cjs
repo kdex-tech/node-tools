@@ -1,0 +1,12 @@
+#!/usr/bin/env node
+
+import { bundleCjs } from './bundle_cjs.js';
+
+async function run() {
+    await bundleCjs();
+}
+
+run().catch(err => {
+    console.error('bundle_cjs failed:', err);
+    process.exit(1);
+});

@@ -1,11 +1,13 @@
 {
   "author": "KDex Tech Inc.",
   "bin": {
+    "bundle_cjs": "./bundle_cjs",
     "generate": "./generate",
     "optimize": "./optimize"
   },
   "dependencies": {
     "@jspm/generator": "^2.11.0",
+    "cjs-module-lexer": "^2.2.0",
     "esbuild": "^0.27.3"
   },
   "description": "Utilities for the KDex ES Modules Packager",

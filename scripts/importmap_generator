@@ -26,6 +26,9 @@ cd "${WORKDIR}"
 echo "--- Generating importmap.json ---"
 generate
 
+echo "--- Bundling CJS deps as ESM (in place) ---"
+bundle_cjs
+
 echo "--- Distributing generated importmap.json ---"
 cp importmap.json "${PACKAGING_DIR}/importmap.json"
 
