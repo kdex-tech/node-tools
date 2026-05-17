@@ -112,7 +112,8 @@ export async function bundleCjs(options = {}) {
             sourcemap: 'inline',
             logLevel: 'error',
         });
-        fs.writeFileSync(filePath, result.outputFiles[0].contents);
+        const patched = rewireRuntimeRequires(result.outputFiles[0].text, externals);
+        fs.writeFileSync(filePath, patched);
         rewritten.push({ url, filePath });
     }
 
@@ -185,6 +186,66 @@ function collectNamedExportsRecursive(absPath, visited) {
         }
     }
     return [...seen];
+}
+
+// Esbuild emits a runtime `__require(spec)` polyfill that throws "Dynamic
+// require of X is not supported" - that fires the moment a CJS-wrapped
+// body executes `require("react")` etc. inside the bundle, even when those
+// IDs are in the externals list. Externalization only avoids inlining the
+// dependency's code; the call site still goes through __require, and the
+// polyfill never resolves the bare specifier.
+//
+// Replace that polyfill with one that looks up the specifier in a static
+// table populated from hoisted `import * as ... from "<spec>"` statements,
+// so externalized requires actually return the imported namespace at
+// runtime. Only the externals the bundle actually references are imported,
+// keeping the importmap-served chunks tight.
+function rewireRuntimeRequires(bundle, externals) {
+    // Collect every external the CJS body references via __require("X").
+    // Anything not referenced doesn't need an import statement.
+    const referenced = new Set();
+    const reqRegex = /__require\(\s*(["'])([^"']+)\1\s*\)/g;
+    let m;
+    while ((m = reqRegex.exec(bundle)) !== null) {
+        if (externals.includes(m[2])) referenced.add(m[2]);
+    }
+    if (referenced.size === 0) return bundle;
+
+    const list = [...referenced];
+    const importLines = list.map((spec, i) => `import * as __ext_${i} from ${JSON.stringify(spec)};`);
+    const mapEntries = list.map((spec, i) => `  ${JSON.stringify(spec)}: __ext_${i}`).join(',\n');
+    const shim = [
+        '',
+        '// bundle_cjs: rewired __require to dispatch to hoisted importmap externals',
+        'var __externals_table = Object.assign(Object.create(null), {',
+        mapEntries,
+        '});',
+        '',
+    ].join('\n');
+
+    // Esbuild's __require polyfill spans the var declaration through the
+    // trailing `});` of its IIFE. The regex matches the whole block plus
+    // the throw-stub it invokes.
+    const polyfillRegex = /var __require = \/\* @__PURE__ \*\/ \(\(x\) => typeof require !== "undefined" \? require : typeof Proxy[\s\S]*?'Dynamic require of "' \+ x \+ '" is not supported'[\s\S]*?\}\);\n/;
+    if (!polyfillRegex.test(bundle)) return bundle;
+
+    // For wrappers we wrote (react/react-dom), the namespace has a `default`
+    // that is the raw CJS module.exports object - return that so callers
+    // who did `var X = require("react"); X.useState(...)` see module.exports
+    // directly. For ESM-native externals (no `default`), return the
+    // namespace itself - callers see named exports as properties.
+    const replacement = [
+        'var __require = (spec) => {',
+        '  if (spec in __externals_table) {',
+        '    const ns = __externals_table[spec];',
+        '    return ns.default !== void 0 ? ns.default : ns;',
+        '  }',
+        '  throw new Error(\'Dynamic require of "\' + spec + \'" is not supported\');',
+        '};',
+        '',
+    ].join('\n');
+
+    return importLines.join('\n') + '\n' + shim + bundle.replace(polyfillRegex, replacement);
 }
 
 // Pre-process a CJS body into a form cjs-module-lexer can read past dead
