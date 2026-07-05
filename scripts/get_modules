@@ -18,8 +18,25 @@ echo "--- Current package.json ---"
 cat package.json
 echo "\n--------------------------"
 
-echo "--- Installing dependencies ---"
-npm install --no-audit --no-fund
+# INSTALLER selects the package installer. It defaults to npm so existing
+# behavior is unchanged; set INSTALLER=bun to use bun instead. Either installer
+# produces a standard hoisted node_modules tree, so the downstream optimize /
+# generate / bundle_cjs steps work identically.
+INSTALLER="${INSTALLER:-npm}"
+
+echo "--- Installing dependencies with ${INSTALLER} ---"
+case "${INSTALLER}" in
+  npm)
+    npm install --no-audit --no-fund
+    ;;
+  bun)
+    bun install --no-progress
+    ;;
+  *)
+    echo "Error: unsupported INSTALLER '${INSTALLER}' (expected 'npm' or 'bun')."
+    exit 1
+    ;;
+esac
 
 echo "--- Optimizing node_modules ---"
 optimize
