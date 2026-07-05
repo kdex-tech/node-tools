@@ -9,7 +9,7 @@
 import { createRequire } from 'node:module';
 import fs from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 // Resolve esbuild from the tooling package (scripts/utils/node_modules), the
 // same install the production optimize.js uses — the prototype adds no deps of
@@ -108,4 +108,14 @@ export async function optimizeSingleBuild(targetDir = 'node_modules') {
         });
     }
     return { count: files.length };
+}
+
+// CLI: `node optimize-batched.js <concurrent|single> [targetDir]` — lets the
+// prototype run as a subprocess (e.g. from the browser-safety pipeline) the
+// same way the production `optimize` wrapper does.
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+    const strategy = process.argv[2] || 'concurrent';
+    const target = process.argv[3] || 'node_modules';
+    const run = strategy === 'single' ? optimizeSingleBuild : optimizeConcurrent;
+    run(target).catch((err) => { console.error(err); process.exit(1); });
 }

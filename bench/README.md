@@ -6,6 +6,8 @@
 >   `generate` / `bundle_cjs` commands under node vs deno vs bun.
 > - **[`optimize/`](./optimize/README.md)** — prototype batching esbuild in
 >   `optimize` (~3x faster, byte-identical output).
+> - **[`browser-safety/`](./browser-safety/README.md)** — verifies the pipeline
+>   invariant (every importmap-reachable module is browser-safe) in real Chromium.
 
 A self-contained simulation that measures how long it takes to install a fixed
 set of dependencies with [bun](https://bun.sh) versus npm. It is relevant to
