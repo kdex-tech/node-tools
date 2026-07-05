@@ -15,19 +15,23 @@ sed -i 's|/scripts/package.json|/tmp/scripts_mock/package.json|g' /tmp/get_modul
 chmod +x /tmp/get_modules_test
 
 # Run the full get_modules -> importmap_generator flow with a given installer
-# and assert the generated import map is valid. This proves both installers are
-# compatible with the downstream optimize / generate / bundle_cjs steps.
-run_flow_for_installer() {
+# and runtime, and assert the generated import map is valid. This proves each
+# INSTALLER (npm/bun) and each RUNTIME (node/bun/deno) is compatible with the
+# downstream optimize / generate / bundle_cjs steps.
+run_flow() {
     installer="$1"
+    runtime="$2"
+    tag="${installer}_${runtime}"
     echo ""
-    echo "=== Integration flow with INSTALLER=${installer} ==="
+    echo "=== Integration flow with INSTALLER=${installer} RUNTIME=${runtime} ==="
 
     export INSTALLER="${installer}"
-    export WORKDIR="$(pwd)/test_workdir_${installer}"
-    export PACKAGING_DIR="$(pwd)/test_packaging_dir_${installer}"
+    export RUNTIME="${runtime}"
+    export WORKDIR="$(pwd)/test_workdir_${tag}"
+    export PACKAGING_DIR="$(pwd)/test_packaging_dir_${tag}"
     export MODULE_PATH="/custom_node_modules"
 
-    echo "--- Running shell integration test: get_modules (${installer}) ---"
+    echo "--- Running shell integration test: get_modules (${tag}) ---"
     /tmp/get_modules_test
 
     if [ ! -f "${WORKDIR}/package.json" ]; then
@@ -35,7 +39,7 @@ run_flow_for_installer() {
         exit 1
     fi
 
-    echo "--- Running shell integration test: importmap_generator (${installer}) ---"
+    echo "--- Running shell integration test: importmap_generator (${tag}) ---"
     ./scripts/importmap_generator
 
     if [ ! -f "${PACKAGING_DIR}/importmap.json" ]; then
@@ -44,31 +48,39 @@ run_flow_for_installer() {
     fi
 
     # Every declared dependency must be present in the generated import map,
-    # regardless of which installer populated node_modules.
+    # regardless of which installer/runtime produced it.
     for dep in lit lodash-es preact; do
         if ! grep -q "${dep}" "${PACKAGING_DIR}/importmap.json"; then
-            echo "Fail: ${dep} not found in import map generated via ${installer}"
+            echo "Fail: ${dep} not found in import map (INSTALLER=${installer} RUNTIME=${runtime})"
             exit 1
         fi
     done
 
-    echo "--- Integration flow with ${installer} passed ---"
+    echo "--- Integration flow ${tag} passed ---"
 
-    # Cleanup for this installer
+    # Cleanup for this combination
     rm -rf "${WORKDIR}" "${PACKAGING_DIR}"
-    unset INSTALLER WORKDIR PACKAGING_DIR MODULE_PATH
+    unset INSTALLER RUNTIME WORKDIR PACKAGING_DIR MODULE_PATH
 }
 
-# npm is always expected to be present.
-run_flow_for_installer npm
+# Baseline: npm installer, node runtime (always available).
+run_flow npm node
 
-# bun is optional: exercise it when available so we prove installer parity,
-# but don't fail the suite on hosts without bun installed.
+# bun is optional: prove it as both an installer and a runtime when available.
 if command -v bun >/dev/null 2>&1; then
-    run_flow_for_installer bun
+    run_flow bun node
+    run_flow npm bun
 else
     echo ""
-    echo "=== Skipping bun flow: 'bun' not found on PATH ==="
+    echo "=== Skipping bun flows: 'bun' not found on PATH ==="
+fi
+
+# deno is optional: prove it as a runtime when available.
+if command -v deno >/dev/null 2>&1; then
+    run_flow npm deno
+else
+    echo ""
+    echo "=== Skipping deno flow: 'deno' not found on PATH ==="
 fi
 
 # Cleanup shared fixtures

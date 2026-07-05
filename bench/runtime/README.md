@@ -7,6 +7,12 @@ speed, and writes a short markdown report.
 
 The latest run's results and takeaways live in [`REPORT.md`](./REPORT.md).
 
+> **Wired into the pipeline.** `get_modules` and `importmap_generator` now honor a
+> `RUNTIME` env var (`node` default, or `bun`/`deno`) that selects the runtime for
+> the packaging commands — the runtime counterpart to `INSTALLER`. All three are
+> verified compatible by the integration test. The image ships `node` + `bun`;
+> `deno` works when installed.
+
 ## Running
 
 ```sh
