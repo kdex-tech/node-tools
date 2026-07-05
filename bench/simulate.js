@@ -31,11 +31,6 @@ const INSTALLERS = {
             args: ['install', '--no-audit', '--no-fund', '--cache', cacheDir],
             env: {},
         }),
-        frozen: (cacheDir) => ({
-            cmd: 'npm',
-            args: ['ci', '--no-audit', '--no-fund', '--cache', cacheDir],
-            env: {},
-        }),
     },
     bun: {
         label: 'bun',
@@ -46,38 +41,23 @@ const INSTALLERS = {
             args: ['install', '--no-progress'],
             env: { BUN_INSTALL_CACHE_DIR: cacheDir },
         }),
-        frozen: (cacheDir) => ({
-            cmd: 'bun',
-            args: ['install', '--no-progress', '--frozen-lockfile'],
-            env: { BUN_INSTALL_CACHE_DIR: cacheDir },
-        }),
     },
 };
 
 /**
- * Scenarios model the three states an install commonly happens from:
- *   - cold      : empty cache, no lockfile   -> full resolve + network download
- *   - warm      : populated cache, no lockfile -> resolve + link from cache
- *   - frozen    : lockfile present, warm cache -> reproducible install (npm ci / --frozen-lockfile)
+ * Two branches per installer model the two states an install commonly happens
+ * from:
+ *   - cold : empty cache   -> full resolve + network download
+ *   - warm : populated cache -> resolve + link from cache
  */
 const SCENARIOS = {
     cold: {
-        label: 'cold (empty cache, no lockfile)',
+        label: 'cold (empty cache)',
         clearCache: true,
-        keepLockfile: false,
-        frozen: false,
     },
     warm: {
-        label: 'warm (cached, no lockfile)',
+        label: 'warm (populated cache)',
         clearCache: false,
-        keepLockfile: false,
-        frozen: false,
-    },
-    frozen: {
-        label: 'frozen (lockfile + cache)',
-        clearCache: false,
-        keepLockfile: true,
-        frozen: true,
     },
 };
 
@@ -86,7 +66,7 @@ function parseArgs(argv) {
         iterations: 3,
         warmup: 1,
         installers: ['npm', 'bun'],
-        scenarios: ['cold', 'warm', 'frozen'],
+        scenarios: ['cold', 'warm'],
         json: false,
     };
     for (let i = 0; i < argv.length; i++) {
@@ -126,17 +106,16 @@ function printHelp() {
 Usage: simulate [options]
 
 Options:
-  -n, --iterations <n>    Measured runs per scenario (default: 3)
-      --warmup <n>        Unmeasured warmup runs per scenario (default: 1)
+  -n, --iterations <n>    Measured runs per branch (default: 3)
+      --warmup <n>        Unmeasured warmup runs per branch (default: 1)
       --installers <list> Comma-separated: npm,bun (default: npm,bun)
-      --scenarios <list>  Comma-separated: cold,warm,frozen (default: all)
+      --scenarios <list>  Comma-separated: cold,warm (default: both)
       --json              Emit machine-readable JSON instead of a table
   -h, --help              Show this help
 
-Scenarios:
-  cold    empty cache, no lockfile   (full resolve + download)
-  warm    populated cache, no lockfile (resolve + link from cache)
-  frozen  lockfile present + cache    (npm ci / bun install --frozen-lockfile)
+Branches (run for each installer):
+  cold    empty cache   (full resolve + download)
+  warm    populated cache (resolve + link from cache)
 
 The fixture installed is react + react-dom + i18next + react-i18next
 (see bench/fixture/package.json).`);
@@ -203,13 +182,15 @@ function stats(samples) {
 }
 
 /**
- * Prepare per-run state according to the scenario, then execute one measured
- * install. `cacheDir` is stable across a scenario's runs so warm/frozen can
- * reuse it; cold clears it up front (handled by the caller).
+ * Prepare per-run state according to the branch, then execute one measured
+ * install. `cacheDir` is stable across a branch's runs so warm can reuse it;
+ * cold clears it before every run.
  */
 function runOnce(installer, scenario, workdir, cacheDir) {
-    // node_modules is always removed so every run does real install work.
+    // node_modules and lockfiles are always removed so every run does real,
+    // equivalent install work regardless of installer.
     rmrf(path.join(workdir, 'node_modules'));
+    removeLockfiles(workdir);
 
     // A cold measurement must start from an empty cache on *every* run,
     // otherwise a prior run (or warmup) silently turns it into a warm install.
@@ -218,21 +199,13 @@ function runOnce(installer, scenario, workdir, cacheDir) {
         fs.mkdirSync(cacheDir, { recursive: true });
     }
 
-    if (!scenario.keepLockfile) {
-        removeLockfiles(workdir);
-    }
-
-    const spec = scenario.frozen
-        ? installer.frozen(cacheDir)
-        : installer.install(cacheDir);
-    return timedInstall(spec, workdir);
+    return timedInstall(installer.install(cacheDir), workdir);
 }
 
 /**
- * Run one unmeasured install to prime state. This populates the (isolated)
- * cache for warm/frozen scenarios and produces the lockfile the frozen
- * scenario needs. Any lockfile it leaves behind is stripped again before
- * measured non-frozen runs by runOnce().
+ * Run one unmeasured install to populate the (isolated) cache. Used by the
+ * warm branch so its measurements never depend on the warmup count. Any
+ * lockfile it leaves behind is stripped again before measured runs by runOnce().
  */
 function seedInstall(installer, workdir, cacheDir) {
     rmrf(path.join(workdir, 'node_modules'));
@@ -284,19 +257,14 @@ async function main() {
                 }
 
                 const workdir = path.join(tmpRoot, `${installerKey}-${scenarioKey}`);
-                // Each (installer, scenario) pair gets an isolated cache dir.
+                // Each (installer, branch) pair gets an isolated cache dir.
                 const cacheDir = path.join(tmpRoot, `cache-${installerKey}-${scenarioKey}`);
                 resetWorkdir(workdir);
-
-                if (scenario.clearCache) {
-                    rmrf(cacheDir);
-                }
                 fs.mkdirSync(cacheDir, { recursive: true });
 
                 if (!scenario.clearCache) {
-                    // warm/frozen measure installs against a populated cache (and
-                    // frozen needs a lockfile); prime both so results don't depend
-                    // on the warmup count.
+                    // The warm branch measures installs against a populated cache;
+                    // prime it once so results don't depend on the warmup count.
                     seedInstall(installer, workdir, cacheDir);
                 }
 

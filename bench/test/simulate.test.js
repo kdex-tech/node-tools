@@ -21,10 +21,12 @@ function testParseArgs() {
     assert.strictEqual(def.iterations, 3, 'default iterations');
     assert.deepStrictEqual(def.installers, ['npm', 'bun'], 'default installers');
 
-    const custom = parseArgs(['-n', '5', '--installers', 'bun', '--scenarios', 'cold,warm', '--json']);
+    assert.deepStrictEqual(def.scenarios, ['cold', 'warm'], 'default branches are cold + warm');
+
+    const custom = parseArgs(['-n', '5', '--installers', 'bun', '--scenarios', 'cold', '--json']);
     assert.strictEqual(custom.iterations, 5, 'iterations override');
     assert.deepStrictEqual(custom.installers, ['bun'], 'installers override');
-    assert.deepStrictEqual(custom.scenarios, ['cold', 'warm'], 'scenarios override');
+    assert.deepStrictEqual(custom.scenarios, ['cold'], 'scenarios override');
     assert.strictEqual(custom.json, true, 'json flag');
 
     assert.throws(() => parseArgs(['--bogus']), /Unknown argument/, 'rejects unknown args');
@@ -38,7 +40,9 @@ function testDefinitions() {
     assert.ok(npmSpec.args.includes('--cache'), 'npm uses isolated cache dir');
     const bunSpec = INSTALLERS.bun.install('/tmp/cache');
     assert.strictEqual(bunSpec.env.BUN_INSTALL_CACHE_DIR, '/tmp/cache', 'bun uses isolated cache dir');
-    assert.ok(SCENARIOS.frozen.frozen, 'frozen scenario runs a frozen install');
+    assert.deepStrictEqual(Object.keys(SCENARIOS), ['cold', 'warm'], 'exactly two branches: cold + warm');
+    assert.strictEqual(SCENARIOS.cold.clearCache, true, 'cold empties the cache');
+    assert.strictEqual(SCENARIOS.warm.clearCache, false, 'warm reuses the cache');
     console.log('--- definitions test passed ---');
 }
 

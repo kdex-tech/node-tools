@@ -16,10 +16,10 @@ See [`fixture/package.json`](./fixture/package.json).
 
 ```sh
 cd bench
-./simulate                       # both installers, all scenarios
-./simulate -n 5                  # 5 measured runs per scenario
+./simulate                       # both installers, both branches
+./simulate -n 5                  # 5 measured runs per branch
 ./simulate --installers bun      # only bun
-./simulate --scenarios cold,warm # subset of scenarios
+./simulate --scenarios cold      # only the cold branch
 ./simulate --json                # machine-readable output
 ```
 
@@ -28,31 +28,34 @@ From the repo root you can also run `make bench`.
 If `bun` (or `npm`) is not on `PATH`, that installer is skipped rather than
 failing the run.
 
-## Scenarios
+## Branches
 
-| Scenario | Cache        | Lockfile | Command                          | Measures |
-|----------|--------------|----------|----------------------------------|----------|
-| `cold`   | empty (per run) | none  | `install`                        | full resolve + download |
-| `warm`   | populated    | none     | `install`                        | resolve + link from cache |
-| `frozen` | populated    | present  | `npm ci` / `bun install --frozen-lockfile` | reproducible CI-style install |
+Each installer is measured on two branches:
+
+| Branch | Cache           | Measures |
+|--------|-----------------|----------|
+| `cold` | empty (per run) | full resolve + download |
+| `warm` | populated       | resolve + link from cache |
 
 ## How it stays fair
 
-- Each `(installer, scenario)` pair runs in its own temp working directory that
-  is reset to a pristine copy of the fixture `package.json`.
+- Each `(installer, branch)` pair runs in its own temp working directory that is
+  reset to a pristine copy of the fixture `package.json`.
 - Each installer uses an **isolated cache directory** (`npm --cache`,
   `BUN_INSTALL_CACHE_DIR`) so the developer's global cache neither biases nor is
   polluted by the benchmark.
-- `node_modules` is removed before every run so each run does real install work.
+- `node_modules` and any lockfile are removed before every run, so each run does
+  real, equivalent install work and one installer's lockfile can never influence
+  another.
 - For `cold`, the cache is emptied before **every** measured run (a warmup would
   otherwise turn it into a warm install).
-- All known lockfiles are removed between non-frozen runs so one installer's
-  lockfile can never influence another.
+- For `warm`, the cache is primed once up front so results don't depend on the
+  warmup count.
 - Timings use `process.hrtime.bigint()` around the install subprocess.
 
 ## Interpreting output
 
-The table reports mean/median/min/max/stddev per scenario, followed by a
+The table reports mean/median/min/max/stddev per branch, followed by a
 head-to-head median speedup. Absolute numbers depend heavily on machine, disk,
 and network; the **ratio between installers on the same machine** is the
 meaningful signal.
