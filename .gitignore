@@ -33,3 +33,12 @@ go.work.sum
 # .vscode/
 
 bin/
+
+# Node.js — dependencies are generated (e.g. `make test` runs `npm ci`) and the
+# benchmark installs into node_modules; never commit these.
+node_modules/
+
+# Benchmark / test scratch output
+importmap.json
+test_workdir*/
+test_packaging_dir*/
