@@ -4,8 +4,14 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 
-import { optimize as optimizeSerial } from '../../scripts/utils/optimize.js';
-import { optimizeConcurrent, optimizeSingleBuild, collectFiles } from './optimize-batched.js';
+import { optimize as optimizeProduction } from '../../scripts/utils/optimize.js';
+import {
+    optimizeSerialReference,
+    optimizeConcurrent,
+    optimizeConcurrentBuild,
+    optimizeSingleBuild,
+    collectFiles,
+} from './optimize-batched.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, '..', '..');
@@ -16,12 +22,13 @@ const FIXTURE_PKG = path.join(REPO_ROOT, 'bench', 'fixture', 'package.json');
  * first is the current production implementation (the baseline); the rest are
  * the prototypes.
  */
+const nm = (dir) => path.join(dir, 'node_modules');
 const STRATEGIES = [
-    { key: 'serial-build (current)', run: (dir) => optimizeSerial(path.join(dir, 'node_modules')) },
-    { key: 'concurrent-transform x4', run: (dir) => optimizeConcurrent(path.join(dir, 'node_modules'), { concurrency: 4 }) },
-    { key: 'concurrent-transform x16', run: (dir) => optimizeConcurrent(path.join(dir, 'node_modules'), { concurrency: 16 }) },
-    { key: 'concurrent-transform x64', run: (dir) => optimizeConcurrent(path.join(dir, 'node_modules'), { concurrency: 64 }) },
-    { key: 'single-build (all files)', run: (dir) => optimizeSingleBuild(path.join(dir, 'node_modules')) },
+    { key: 'serial-build (baseline)', run: (dir) => optimizeSerialReference(nm(dir)) },
+    { key: 'concurrent-build x16 [integrated]', run: (dir) => optimizeConcurrentBuild(nm(dir), { concurrency: 16 }) },
+    { key: 'concurrent-transform x16', run: (dir) => optimizeConcurrent(nm(dir), { concurrency: 16 }) },
+    { key: 'single-build (all files)', run: (dir) => optimizeSingleBuild(nm(dir)) },
+    { key: 'production optimize()', run: (dir) => optimizeProduction(nm(dir)) },
 ];
 
 function parseArgs(argv) {

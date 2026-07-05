@@ -110,12 +110,83 @@ export async function optimizeSingleBuild(targetDir = 'node_modules') {
     return { count: files.length };
 }
 
-// CLI: `node optimize-batched.js <concurrent|single> [targetDir]` — lets the
-// prototype run as a subprocess (e.g. from the browser-safety pipeline) the
-// same way the production `optimize` wrapper does.
+/**
+ * Strategy C — a concurrency pool over the same `build` call the production
+ * optimizer uses (bundle:false, outfile:file). Because the per-file call is
+ * unchanged, the output is byte-for-byte identical to the serial version
+ * (sourcemaps included), so integrity hashes never move. This is the strategy
+ * integrated into scripts/utils/optimize.js.
+ */
+export async function optimizeConcurrentBuild(targetDir = 'node_modules', { concurrency = 16 } = {}) {
+    const files = collectFiles(targetDir);
+    let next = 0;
+    let failed = 0;
+
+    async function worker() {
+        for (;;) {
+            const i = next++;
+            if (i >= files.length) return;
+            const file = files[i];
+            try {
+                await build({
+                    entryPoints: [file],
+                    bundle: false,
+                    allowOverwrite: true,
+                    outfile: file,
+                    define: DEFINE,
+                    sourcemap: 'inline',
+                    sourcesContent: true,
+                    logLevel: 'error',
+                });
+            } catch (e) {
+                failed++;
+                console.error(`Failed to optimize ${file}: ${e.message}`);
+            }
+        }
+    }
+
+    const workers = Math.max(1, Math.min(concurrency, files.length));
+    await Promise.all(Array.from({ length: workers }, worker));
+    return { count: files.length, failed };
+}
+
+/**
+ * The pre-integration serial baseline (one awaited build() per file). Kept so
+ * the benchmark can always show the serial -> batched speedup, independent of
+ * whatever the shipped optimize.js does.
+ */
+export async function optimizeSerialReference(targetDir = 'node_modules') {
+    const files = collectFiles(targetDir);
+    for (const file of files) {
+        try {
+            await build({
+                entryPoints: [file],
+                bundle: false,
+                allowOverwrite: true,
+                outfile: file,
+                define: DEFINE,
+                sourcemap: 'inline',
+                sourcesContent: true,
+                logLevel: 'error',
+            });
+        } catch (e) {
+            console.error(`Failed to optimize ${file}: ${e.message}`);
+        }
+    }
+    return { count: files.length };
+}
+
+// CLI: `node optimize-batched.js <concurrent|build|single|serial> [targetDir]` —
+// lets the prototype run as a subprocess (e.g. from the browser-safety pipeline)
+// the same way the production `optimize` wrapper does.
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
     const strategy = process.argv[2] || 'concurrent';
     const target = process.argv[3] || 'node_modules';
-    const run = strategy === 'single' ? optimizeSingleBuild : optimizeConcurrent;
-    run(target).catch((err) => { console.error(err); process.exit(1); });
+    const runners = {
+        concurrent: optimizeConcurrent,
+        build: optimizeConcurrentBuild,
+        single: optimizeSingleBuild,
+        serial: optimizeSerialReference,
+    };
+    (runners[strategy] || optimizeConcurrent)(target).catch((err) => { console.error(err); process.exit(1); });
 }

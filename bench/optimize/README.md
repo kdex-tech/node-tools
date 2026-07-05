@@ -1,4 +1,9 @@
-# Prototype: batching esbuild in `optimize`
+# Batching esbuild in `optimize`
+
+> **Status: integrated.** `scripts/utils/optimize.js` now runs a bounded
+> concurrency pool of the same per-file `build()` call (`concurrent-build`
+> below), ~2.5x faster with byte-identical output. This directory keeps the
+> benchmark and the alternative strategies that informed that choice.
 
 `optimize` (scripts/utils/optimize.js) is the slowest packaging command by an
 order of magnitude — and unlike `generate`/`bundle_cjs`, it's **not** helped by
@@ -24,24 +29,27 @@ import surface — including the CJS subpath entries an app actually imports
 transforms.
 
 
-| strategy | median | speedup | output identical* |
+| strategy | median | speedup | output vs serial |
 |---|---|---|---|
-| serial-build (current) | 1521ms | 1.00x | (reference) |
-| concurrent-transform ×4 | 596ms | 2.55x | yes |
-| concurrent-transform ×16 | 499ms | 3.05x | yes |
-| concurrent-transform ×64 | 484ms | 3.14x | yes |
-| single-build (all files) | 420ms | **3.62x** | yes |
+| serial-build (baseline) | 1538ms | 1.00x | (reference) |
+| **concurrent-build ×16 [integrated]** | 646ms | **2.4x** | **byte-identical** |
+| concurrent-transform ×16 | 460ms | 3.3x | code-identical* |
+| single-build (all files) | 347ms | 4.4x | byte-identical |
 
-\* code bodies byte-for-byte identical to the current implementation (the inline
-sourcemap comment is stripped before comparison); all 376 files still receive a
-sourcemap. Reproduce with `node bench/optimize/bench.js`.
+\* code bodies identical; the inline sourcemap comment can differ (it's a
+comment the browser ignores). Reproduce with `node bench/optimize/bench.js`.
 
-## The two strategies
+## The three strategies
 
-- **`concurrent-transform`** — a bounded worker pool over esbuild's `transform`
-  API. Reads and writes each file itself, keeping N transforms in flight.
-- **`single-build`** — one `build()` call for all files (grouped by extension),
-  esbuild parallelizes internally. Fewest round-trips, so the fastest here.
+- **`concurrent-build`** *(integrated)* — a bounded worker pool over the **same
+  `build()` call** the serial version used. Because the per-file call is
+  unchanged, output is byte-for-byte identical (sourcemaps included, so integrity
+  hashes never move).
+- **`concurrent-transform`** — a pool over esbuild's `transform` API. Faster, but
+  it re-emits the sourcemap and can drift by a byte, so integrity hashes would
+  change for a few files.
+- **`single-build`** — one `build()` call for all files (grouped by extension).
+  Fastest, but all-or-nothing on a single unparseable file.
 
 ## Why the file mix matters (and why the fixture isn't enough)
 
@@ -58,34 +66,38 @@ asserts:
   is immune because it overwrites in place.)
 - nested `node_modules` is skipped, matching the current walk.
 
-It also pins down the key behavioural difference:
+It also pins down the key behavioural differences that decided the integration:
 
-| | current (serial) | concurrent-transform | single-build |
-|---|---|---|---|
-| speed | 1.0x | ~3.1x | ~3.6x |
-| `.mjs` handling | in place | in place | per-extension grouping |
-| one unparseable file | skipped, rest continue | **skipped, rest continue** | **whole batch aborts** |
-| memory vs tree size | flat | flat (bounded by N) | grows with entry count |
+| | serial (old) | concurrent-build (integrated) | concurrent-transform | single-build |
+|---|---|---|---|---|
+| speed | 1.0x | ~2.5x | ~3.3x | ~4.4x |
+| output vs serial | — | **byte-identical** | code-identical | byte-identical |
+| `.mjs` handling | in place | in place | in place | per-extension grouping |
+| one unparseable file | skipped, rest continue | **skipped, rest continue** | skipped, rest continue | **whole batch aborts** |
+| memory vs tree size | flat | flat (bounded by N) | flat (bounded by N) | grows with entry count |
 
-## Recommendation
+## Why `concurrent-build` was integrated
 
-**`concurrent-transform`** is the production-worthy choice, not the marginally
-faster `single-build`. Because runtime workloads change wildly, the deciding
-factors are robustness, not the last 15%:
+`single-build` and `concurrent-transform` are faster, but for a production
+drop-in the deciding factor is **zero output drift**, not the last 15%:
 
-1. It preserves the current **per-file error isolation** — a single file esbuild
-   can't parse is skipped and the rest still optimize. `single-build` is
-   all-or-nothing and would fail the entire step on one bad file.
-2. It's **extension-agnostic** (in-place overwrite) regardless of the `.js`/`.mjs`
-   mix, with no reliance on esbuild's output-path/extension rules.
-3. It's **~3x faster** and produces byte-identical output.
+1. **Byte-identical output.** It reuses the exact per-file `build()` call, so
+   every file — sourcemap included — is unchanged, and the import map's SRI
+   integrity hashes never move. `concurrent-transform` re-emits sourcemaps
+   (integrity would change for a few files); `single-build` also changes bytes.
+2. **Preserves per-file error isolation.** A file esbuild can't parse is logged
+   and skipped, the rest continue — matching the old behaviour. `single-build`
+   is all-or-nothing and would fail the whole step on one bad file, which is a
+   real risk since real workloads vary wildly.
+3. **Still ~2.5x faster**, extension-agnostic (in-place overwrite), and flat in
+   memory.
 
-A reasonable default concurrency is a small multiple of the core count (esbuild's
-service parallelizes across `GOMAXPROCS` internally; N in-flight requests just
-keep it fed). ×16 already captures most of the win here.
+Default concurrency is a small multiple of the core count (esbuild parallelizes
+across `GOMAXPROCS`; N in-flight `build()` calls keep it fed); override with
+`OPTIMIZE_CONCURRENCY`.
 
 ## Files
 
-- `optimize-batched.js` — both prototype strategies (reuses the tooling's esbuild).
-- `bench.js` — times each strategy vs the current one and verifies equivalence.
+- `optimize-batched.js` — all strategies + the serial reference (reuses the tooling's esbuild).
+- `bench.js` — times each strategy vs the serial baseline and verifies equivalence.
 - `test/correctness.test.js` — variable-workload correctness (`.js`/`.mjs`, bad files, nesting).

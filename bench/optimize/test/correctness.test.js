@@ -9,6 +9,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { optimizeConcurrent, optimizeSingleBuild, collectFiles } from '../optimize-batched.js';
+import { optimize as optimizeProduction } from '../../../scripts/utils/optimize.js';
 
 function makeTree(root) {
     const nm = path.join(root, 'node_modules');
@@ -117,12 +118,37 @@ async function testCollectFilesSkips() {
     }
 }
 
+async function testProductionOptimizeHandlesMixedTree() {
+    console.log('--- production optimize(): mixed .js/.mjs + broken + nested ---');
+    const root = freshTree();
+    const nm = path.join(root, 'node_modules');
+    try {
+        // The shipped optimizer (concurrent-build) must survive the same variable
+        // workload: preserve .mjs, substitute NODE_ENV, skip a bad file, and not
+        // walk nested node_modules.
+        await optimizeProduction(nm);
+
+        const esm = path.join(nm, 'pkga', 'esm.mjs');
+        assert.ok(hasSourceMap(esm), '.mjs optimized in place');
+        assert.ok(!fs.existsSync(path.join(nm, 'pkga', 'esm.js')), 'no stray .js sibling for .mjs');
+        const js = path.join(nm, 'pkga', 'index.js');
+        assert.ok(hasSourceMap(js) && fs.readFileSync(js, 'utf8').includes('"production"'), 'NODE_ENV define applied');
+        assert.ok(!hasSourceMap(path.join(nm, 'pkgb', 'broken.js')), 'broken file skipped, not aborted');
+        assert.ok(!hasSourceMap(path.join(nm, 'pkgb', 'node_modules', 'dep', 'index.js')),
+            'nested node_modules not walked');
+        console.log('--- passed: production optimize() is extension-safe and resilient ---');
+    } finally {
+        fs.rmSync(root, { recursive: true, force: true });
+    }
+}
+
 async function run() {
     await testCollectFilesSkips();
     await testConcurrentHandlesMixedTree();
     await testSingleBuildPreservesMjs();
     await testSingleBuildAbortsOnBadFile();
-    console.log('\n--- All optimize prototype correctness tests passed ---');
+    await testProductionOptimizeHandlesMixedTree();
+    console.log('\n--- All optimize correctness tests passed ---');
 }
 
 run().catch((err) => { console.error('correctness test failed:', err); process.exit(1); });

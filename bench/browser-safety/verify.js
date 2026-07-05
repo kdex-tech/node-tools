@@ -153,8 +153,8 @@ async function browserCheck(chromium, dir, importmap) {
 }
 
 const VARIANTS = [
-    { key: 'serial optimize (current)', argv: ['node', path.join(UTILS, 'optimize')] },
-    { key: 'batched optimize (concurrent-transform)', argv: ['node', BATCHED, 'concurrent'] },
+    { key: 'production optimize (integrated batching)', argv: ['node', path.join(UTILS, 'optimize')] },
+    { key: 'serial reference (pre-integration)', argv: ['node', BATCHED, 'serial'] },
 ];
 
 async function main() {
@@ -224,10 +224,10 @@ async function main() {
         const bothSafe = a.safe && b.safe;
         const invariantHeld = bothSafe && diff === 0;
         console.log(`\n=== VERDICT ===`);
-        console.log(`  serial pipeline browser-safe:  ${a.safe ? 'yes' : 'no'} (${a.ok}/${a.total})`);
-        console.log(`  batched pipeline browser-safe: ${b.safe ? 'yes' : 'no'} (${b.ok}/${b.total})`);
-        console.log(`  importmap-reachable code identical across refactor: ${diff === 0 ? 'yes' : 'no'}`);
-        console.log(`  => invariant ${invariantHeld ? 'HOLDS under the optimize refactor ✅' : 'AT RISK ❌'}`);
+        console.log(`  production (batched) pipeline browser-safe: ${a.safe ? 'yes' : 'no'} (${a.ok}/${a.total})`);
+        console.log(`  serial-reference pipeline browser-safe:     ${b.safe ? 'yes' : 'no'} (${b.ok}/${b.total})`);
+        console.log(`  importmap-reachable code identical (batched vs serial): ${diff === 0 ? 'yes' : 'no'}`);
+        console.log(`  => invariant ${invariantHeld ? 'HOLDS for the integrated pipeline ✅' : 'AT RISK ❌'}`);
         process.exitCode = invariantHeld ? 0 : 1;
     } finally {
         rmrf(tmpRoot);

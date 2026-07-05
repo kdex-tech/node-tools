@@ -1,8 +1,17 @@
 import { build } from 'esbuild';
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 
-export async function optimize(targetDir = 'node_modules') {
+// How many esbuild build() calls to keep in flight at once. optimize() awaited
+// one build() per file serially, which pins a single core while esbuild's
+// worker pool sits idle; running a bounded pool concurrently saturates it and
+// is ~2.5x faster on the react + i18next fixture. Each build() call is
+// unchanged, so the output is byte-for-byte identical to the serial version
+// (see bench/optimize). Override with OPTIMIZE_CONCURRENCY.
+const DEFAULT_CONCURRENCY = Math.max(4, (os.availableParallelism?.() ?? os.cpus().length) * 4);
+
+export async function optimize(targetDir = 'node_modules', options = {}) {
     const files = [];
 
     function walk(dir) {
@@ -38,7 +47,7 @@ export async function optimize(targetDir = 'node_modules') {
     const uniqueFiles = Array.from(new Set(files));
     console.log('Found ' + uniqueFiles.length + ' unique files to optimize.');
 
-    for (const file of uniqueFiles) {
+    async function optimizeFile(file) {
         try {
             await build({
                 entryPoints: [file],
@@ -51,8 +60,27 @@ export async function optimize(targetDir = 'node_modules') {
                 logLevel: 'error',
             });
         } catch (e) {
+            // Isolate per-file failures exactly as the serial loop did: a file
+            // esbuild can't parse is logged and skipped, the rest continue.
             console.error("Failed to optimize " + file + ": " + e.message);
         }
     }
+
+    // Bounded worker pool over the file list. Each worker pulls the next index
+    // until the list is exhausted, keeping `concurrency` build() calls in flight.
+    const concurrency = options.concurrency
+        || Number(process.env.OPTIMIZE_CONCURRENCY)
+        || DEFAULT_CONCURRENCY;
+    let next = 0;
+    async function worker() {
+        for (;;) {
+            const i = next++;
+            if (i >= uniqueFiles.length) return;
+            await optimizeFile(uniqueFiles[i]);
+        }
+    }
+    const workerCount = Math.max(1, Math.min(concurrency, uniqueFiles.length));
+    await Promise.all(Array.from({ length: workerCount }, worker));
+
     console.log("--- Optimization complete ---");
 }
