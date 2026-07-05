@@ -79,3 +79,8 @@ bench: ## Run the bun vs npm install benchmark simulation
 bench-runtime: ## Run the node/deno/bun runtime benchmark for optimize/generate/bundle_cjs
 	@echo "Running runtime benchmark (node vs deno vs bun)..."
 	./bench/runtime/run $(BENCH_ARGS)
+
+.PHONY: bench-optimize
+bench-optimize: scripts/utils/node_modules ## Run the optimize esbuild-batching prototype benchmark
+	@echo "Running optimize batching benchmark..."
+	node ./bench/optimize/bench.js $(BENCH_ARGS)
