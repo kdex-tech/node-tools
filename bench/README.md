@@ -1,5 +1,10 @@
 # Install benchmark: bun vs npm
 
+> There are two benchmarks in this directory:
+> - **This one** — install speed (`bun` vs `npm`), below.
+> - **[`runtime/`](./runtime/README.md)** — execution speed of the `optimize` /
+>   `generate` / `bundle_cjs` commands under node vs deno vs bun.
+
 A self-contained simulation that measures how long it takes to install a fixed
 set of dependencies with [bun](https://bun.sh) versus npm. It is relevant to
 this repo because the packaging pipeline (`get_modules`) starts by running an

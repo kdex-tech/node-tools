@@ -74,3 +74,8 @@ scripts/utils/node_modules: scripts/utils/package.json scripts/utils/package-loc
 bench: ## Run the bun vs npm install benchmark simulation
 	@echo "Running install benchmark (bun vs npm)..."
 	./bench/simulate $(BENCH_ARGS)
+
+.PHONY: bench-runtime
+bench-runtime: ## Run the node/deno/bun runtime benchmark for optimize/generate/bundle_cjs
+	@echo "Running runtime benchmark (node vs deno vs bun)..."
+	./bench/runtime/run $(BENCH_ARGS)
