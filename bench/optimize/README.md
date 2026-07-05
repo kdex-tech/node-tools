@@ -16,7 +16,13 @@ box that pins one core and idles the other three. This directory prototypes
 feeding esbuild in **batches** so its internal worker pool stays saturated, with
 the identical per-file transform (`define` NODE_ENV, inline sourcemap).
 
-## Results (react + i18next fixture, 376 files, 4 cores)
+## Results (realistic React + i18next fixture, 376 files, 4 cores)
+
+The fixture (`bench/fixture/package.json`) is the real closure behind a typical
+import surface — including the CJS subpath entries an app actually imports
+(`react/jsx-runtime`, `react-dom/client`, ...), all of which `optimize` walks and
+transforms.
+
 
 | strategy | median | speedup | output identical* |
 |---|---|---|---|

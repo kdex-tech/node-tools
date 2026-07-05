@@ -117,7 +117,8 @@ Branches (run for each installer):
   cold    empty cache   (full resolve + download)
   warm    populated cache (resolve + link from cache)
 
-The fixture installed is react + react-dom + i18next + react-i18next
+The fixture installed is a realistic React + i18next set: react, react-dom,
+i18next, react-i18next, html-parse-stringify, void-elements
 (see bench/fixture/package.json).`);
 }
 

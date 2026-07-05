@@ -12,10 +12,13 @@ set of dependencies with [bun](https://bun.sh) versus npm. It is relevant to
 this repo because the packaging pipeline (`get_modules`) starts by running an
 `npm install`, so the installer's speed directly affects end-to-end throughput.
 
-The fixture is a typical React + i18n front-end dependency set:
+The fixture is a realistic React + i18n front-end dependency set — the closure
+behind a typical import surface (`react`, `react-dom/client`, `react/jsx-runtime`,
+`react-i18next`, `i18next`, ...):
 
 - `react`, `react-dom`
 - `i18next`, `react-i18next`
+- `html-parse-stringify`, `void-elements`
 
 See [`fixture/package.json`](./fixture/package.json).
 
