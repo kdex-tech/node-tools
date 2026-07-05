@@ -14,14 +14,69 @@ cp /scripts/package.json "${WORKDIR}/package.json"
 
 cd "${WORKDIR}"
 
+# RUNTIME selects the JS runtime used to execute the packaging commands
+# (optimize here; generate/bundle_cjs in importmap_generator). Defaults to node
+# so existing behavior is unchanged. node/bun run the command wrapper directly;
+# deno needs permissions and to reuse the on-disk node_modules. All three are
+# verified compatible (see bench/runtime).
+RUNTIME="${RUNTIME:-node}"
+case "${RUNTIME}" in
+  node|bun|deno)
+    if ! command -v "${RUNTIME}" >/dev/null 2>&1; then
+      echo "Error: RUNTIME '${RUNTIME}' selected but '${RUNTIME}' is not installed."
+      exit 1
+    fi
+    ;;
+  *)
+    echo "Error: unsupported RUNTIME '${RUNTIME}' (expected 'node', 'bun', or 'deno')."
+    exit 1
+    ;;
+esac
+
+# Run a packaging command wrapper under the selected RUNTIME.
+run_cmd() {
+  cmd_name="$1"
+  shift
+  cmd_bin="$(command -v "${cmd_name}")"
+  if [ -z "${cmd_bin}" ]; then
+    echo "Error: command '${cmd_name}' not found on PATH."
+    exit 1
+  fi
+  # Resolve to the real file so bun/deno resolve the wrapper's node_modules from
+  # its actual location, not through the global-bin symlink.
+  cmd_bin="$(readlink -f "${cmd_bin}" 2>/dev/null || echo "${cmd_bin}")"
+  case "${RUNTIME}" in
+    node) node "${cmd_bin}" "$@" ;;
+    bun)  bun "${cmd_bin}" "$@" ;;
+    deno) deno run -A --node-modules-dir=manual "${cmd_bin}" "$@" ;;
+  esac
+}
+
 echo "--- Current package.json ---"
 cat package.json
 echo "\n--------------------------"
 
-echo "--- Installing dependencies ---"
-npm install --no-audit --no-fund
+# INSTALLER selects the package installer. It defaults to npm so existing
+# behavior is unchanged; set INSTALLER=bun to use bun instead. Either installer
+# produces a standard hoisted node_modules tree, so the downstream optimize /
+# generate / bundle_cjs steps work identically.
+INSTALLER="${INSTALLER:-npm}"
 
-echo "--- Optimizing node_modules ---"
-optimize
+echo "--- Installing dependencies with ${INSTALLER} ---"
+case "${INSTALLER}" in
+  npm)
+    npm install --no-audit --no-fund
+    ;;
+  bun)
+    bun install --no-progress
+    ;;
+  *)
+    echo "Error: unsupported INSTALLER '${INSTALLER}' (expected 'npm' or 'bun')."
+    exit 1
+    ;;
+esac
+
+echo "--- Optimizing node_modules (runtime: ${RUNTIME}) ---"
+run_cmd optimize
 
 echo "--- get_modules completed successfully ---"

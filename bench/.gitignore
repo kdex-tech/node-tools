@@ -1,0 +1,7 @@
+# The simulation installs into temp dirs, never in-tree. These entries guard
+# against accidental in-place runs leaking into commits.
+node_modules/
+fixture/node_modules/
+fixture/package-lock.json
+fixture/bun.lock
+fixture/bun.lockb

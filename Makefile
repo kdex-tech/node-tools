@@ -67,3 +67,25 @@ test: scripts/utils/node_modules ## Run all tests
 scripts/utils/node_modules: scripts/utils/package.json scripts/utils/package-lock.json
 	@echo "Installing test dependencies..."
 	cd scripts/utils && npm ci
+
+##@ Benchmark
+
+.PHONY: bench
+bench: ## Run the bun vs npm install benchmark simulation
+	@echo "Running install benchmark (bun vs npm)..."
+	./bench/simulate $(BENCH_ARGS)
+
+.PHONY: bench-runtime
+bench-runtime: ## Run the node/deno/bun runtime benchmark for optimize/generate/bundle_cjs
+	@echo "Running runtime benchmark (node vs deno vs bun)..."
+	./bench/runtime/run $(BENCH_ARGS)
+
+.PHONY: bench-optimize
+bench-optimize: scripts/utils/node_modules ## Run the optimize esbuild-batching prototype benchmark
+	@echo "Running optimize batching benchmark..."
+	node ./bench/optimize/bench.js $(BENCH_ARGS)
+
+.PHONY: verify-browser-safety
+verify-browser-safety: scripts/utils/node_modules ## Verify importmap-reachable code is browser-safe (real Chromium)
+	@echo "Verifying browser-safety of the importmap closure..."
+	node ./bench/browser-safety/verify.js
