@@ -1,0 +1,8 @@
+#!/usr/bin/env node
+
+import { main } from './simulate.js';
+
+main().catch((err) => {
+    console.error('bench simulation failed:', err);
+    process.exit(1);
+});

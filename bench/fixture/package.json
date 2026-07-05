@@ -1,0 +1,13 @@
+{
+  "name": "bench-fixture",
+  "version": "1.0.0",
+  "description": "Dependency fixture used to benchmark bun vs npm install performance.",
+  "private": true,
+  "license": "Apache-2.0",
+  "dependencies": {
+    "i18next": "^23.11.5",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-i18next": "^14.1.2"
+  }
+}

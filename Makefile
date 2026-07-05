@@ -67,3 +67,10 @@ test: scripts/utils/node_modules ## Run all tests
 scripts/utils/node_modules: scripts/utils/package.json scripts/utils/package-lock.json
 	@echo "Installing test dependencies..."
 	cd scripts/utils && npm ci
+
+##@ Benchmark
+
+.PHONY: bench
+bench: ## Run the bun vs npm install benchmark simulation
+	@echo "Running install benchmark (bun vs npm)..."
+	./bench/simulate $(BENCH_ARGS)

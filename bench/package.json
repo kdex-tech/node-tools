@@ -1,0 +1,15 @@
+{
+  "name": "bench",
+  "version": "1.0.0",
+  "description": "Benchmark simulation comparing bun vs npm install performance.",
+  "license": "Apache-2.0",
+  "author": "KDex Tech Inc.",
+  "type": "module",
+  "bin": {
+    "bench": "./simulate"
+  },
+  "scripts": {
+    "bench": "./simulate",
+    "test": "node test/simulate.test.js"
+  }
+}
