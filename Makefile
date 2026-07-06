@@ -47,11 +47,18 @@ docker-build: ## Build docker image with the manager.
 
 .PHONY: docker-buildx
 docker-buildx: ## Build and push docker image for the manager for cross-platform support
-	# copy existing Dockerfile and insert --platform=${BUILDPLATFORM} into Dockerfile.cross, and preserve the original Dockerfile
-	sed -e '1 s/\(^FROM\)/FROM --platform=\$$\{BUILDPLATFORM\}/; t' -e ' 1,// s//FROM --platform=\$$\{BUILDPLATFORM\}/' Dockerfile > Dockerfile.cross
+	# node-tools is a SINGLE-STAGE RUNTIME image: the base IS the runtime, so
+	# FROM must NOT be pinned to --platform=$${BUILDPLATFORM}. That pin is the
+	# kubebuilder pattern for cross-COMPILED Go binaries (build stage on the
+	# build host, GOARCH-selected binary copied into a per-target final stage) —
+	# on a single-stage runtime image it builds EVERY target, including
+	# linux/arm64, FROM the amd64 base, so the "arm64" image is amd64 top to
+	# bottom (exec format error on real arm64). See kdex-tech/node-tools#5.
+	# Build the plain Dockerfile so buildx resolves node:24-alpine per target;
+	# non-native RUN steps execute under QEMU/binfmt on the builder (registered
+	# by the publish-docker-image action).
 	$(CONTAINER_TOOL) buildx inspect kdex-builder >/dev/null 2>&1 || $(CONTAINER_TOOL) buildx create --name kdex-builder --use
-	$(CONTAINER_TOOL) buildx build --push --platform=$(PLATFORMS) --tag ${REPOSITORY}${IMG}${TAG} --tag ${REPOSITORY}${IMG}:latest -f Dockerfile.cross .
-	rm Dockerfile.cross
+	$(CONTAINER_TOOL) buildx build --push --platform=$(PLATFORMS) --tag ${REPOSITORY}${IMG}${TAG} --tag ${REPOSITORY}${IMG}:latest -f Dockerfile .
 
 .PHONY: docker-push
 docker-push: ## Push docker image with the manager.

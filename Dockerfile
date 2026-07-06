@@ -13,11 +13,13 @@ RUN apk add --no-cache curl jq tree unzip libstdc++ libgcc
 # that lack AVX2. Fails the build on an unsupported architecture rather than
 # silently producing an image without bun.
 #
-# NOTE: docker-buildx pins FROM to --platform=$BUILDPLATFORM, so every RUN
-# executes on the build arch even when producing the arm64 image. We fetch the
-# TARGETARCH-matched binary, but must NOT execute it here: running the arm64
-# bun on the amd64 builder fails with ENOEXEC (busybox then parses the ELF as a
-# script -> "syntax error"). Verify with test -x, not `bun --version`.
+# NOTE: FROM is no longer pinned to $BUILDPLATFORM (see kdex-tech/node-tools#5),
+# so this RUN executes under the TARGET platform — natively for the build arch,
+# under QEMU/binfmt for the other. TARGETARCH still selects the matching bun.
+# We verify with `test -x` rather than executing bun (`bun --version`): a plain
+# executability check avoids depending on QEMU correctly emulating the heavy bun
+# binary during the build, and is sufficient here — bun runs for real at runtime
+# on native hardware.
 RUN set -eux; \
     case "${TARGETARCH}" in \
         amd64) BUN_PKG='bun-linux-x64-musl-baseline' ;; \

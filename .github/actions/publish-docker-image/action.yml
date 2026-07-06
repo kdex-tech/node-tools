@@ -10,6 +10,13 @@ runs:
     run: |
       echo "${{ github.token }}" | docker login ghcr.io/${{ github.repository }} -u ${{ github.actor }} --password-stdin
 
+  # Register binfmt/QEMU so the non-native (arm64) RUN steps in the per-target
+  # base build can execute under emulation on the amd64 runner. Required since
+  # node-tools#5 dropped the FROM=$BUILDPLATFORM pin (which previously ran every
+  # RUN natively on amd64, producing a mislabeled amd64 "arm64" image).
+  - name: Set up QEMU
+    uses: docker/setup-qemu-action@v3
+
   - name: Push image
     shell: bash
     run: |
