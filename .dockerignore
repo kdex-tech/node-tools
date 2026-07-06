@@ -1,0 +1,14 @@
+# Never copy host-resolved dependencies into the image. Under multi-arch buildx
+# (node-tools#5/#6) the build context is populated on the amd64 CI runner (e.g.
+# `make test` runs `npm ci` before the image build), so a copied node_modules is
+# the WRONG architecture on the arm64 image. esbuild is the sharp edge: it ships
+# its native binary as a per-arch optional dep (@esbuild/linux-<arch>), so a
+# copied amd64 tree makes importmap_generator / bundle_cjs fail on real arm64.
+# Dependencies are installed FRESH per target platform in the Dockerfile.
+**/node_modules
+
+# Build/dev-only surfaces that never belong in the runtime image.
+.git
+.github
+bench
+docs

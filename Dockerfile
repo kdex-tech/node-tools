@@ -36,7 +36,29 @@ WORKDIR /
 
 COPY scripts/ /usr/local/bin/
 
+# Install the utils toolchain's deps FRESH, under the TARGET platform, into the
+# tree the runtime resolves them from (/usr/local/bin/utils/node_modules). The
+# build context excludes node_modules (.dockerignore), so the host-resolved
+# amd64 tree is never copied in — esbuild ships its native binary as a per-arch
+# optional dep (@esbuild/linux-<arch>), and a copied amd64 tree makes
+# importmap_generator / bundle_cjs fail on real arm64 nodes. See
+# kdex-tech/node-tools#6. Under buildx this RUN executes on the target platform
+# (native for amd64, QEMU for arm64), so npm resolves the matching @esbuild.
+RUN cd /usr/local/bin/utils && npm ci
+
 RUN npm install -g /usr/local/bin/utils
+
+# Guard: fail the build if the arch-correct esbuild native binary is missing, so
+# a future context/cache slip can't silently reship the wrong-arch esbuild
+# (node-tools#6). esbuild names the package linux-x64 for amd64 and linux-arm64
+# for arm64, so map TARGETARCH (mirrors the bun TARGETARCH case above).
+RUN set -eux; \
+    case "${TARGETARCH}" in \
+        amd64) ESBUILD_ARCH='x64' ;; \
+        arm64) ESBUILD_ARCH='arm64' ;; \
+        *) echo "Unsupported TARGETARCH for esbuild check: '${TARGETARCH}'" >&2; exit 1 ;; \
+    esac; \
+    test -d "/usr/local/bin/utils/node_modules/@esbuild/linux-${ESBUILD_ARCH}"
 
 RUN chmod 777 /usr/local/bin/get_modules; \
     chmod 777 /usr/local/bin/importmap_generator
