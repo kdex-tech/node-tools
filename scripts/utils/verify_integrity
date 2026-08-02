@@ -1,0 +1,46 @@
+#!/usr/bin/env node
+
+import { verifyIntegrity } from './verify_integrity.js';
+
+// Exit non-zero on a CONFIRMED mismatch only. Packages that could not be
+// verified are reported and tolerated -- see verify_integrity.js for why
+// "could not check" must not fail the build.
+//
+// Set VERIFY_INTEGRITY=0 to skip entirely (escape hatch for a registry that
+// cannot serve dist metadata). See kdex-tech/host-manager#161.
+async function run() {
+    if (process.env.VERIFY_INTEGRITY === '0') {
+        console.log('--- Skipping integrity verification (VERIFY_INTEGRITY=0) ---');
+        return;
+    }
+
+    const { checked, skipped, failures, unverified } = await verifyIntegrity({
+        workdir: process.env.WORKDIR || process.cwd(),
+    });
+
+    console.log(
+        `--- Integrity: ${checked.length} verified, ${skipped.length} skipped, ` +
+        `${unverified.length} unverified, ${failures.length} failed ---`
+    );
+
+    if (failures.length > 0) {
+        console.error('');
+        console.error('Installed packages do NOT match the registry:');
+        for (const f of failures) {
+            console.error(`  ✗ ${f.name}@${f.version}: ${f.reason}`);
+        }
+        console.error('');
+        console.error(
+            'Refusing to aggregate. This is the propagation-window failure from ' +
+            'kdex-tech/host-manager#161: the install captured content that is not ' +
+            'what the registry publishes for the pinned version. Re-running once ' +
+            'the registry is consistent produces a correct image.'
+        );
+        process.exit(1);
+    }
+}
+
+run().catch((err) => {
+    console.error('Integrity verification runner failed:', err);
+    process.exit(1);
+});

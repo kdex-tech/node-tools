@@ -76,6 +76,16 @@ case "${INSTALLER}" in
     ;;
 esac
 
+# Verify the install actually reflects the registry BEFORE optimize rewrites
+# node_modules in place -- after that no installed file matches its published
+# bytes and the comparison is meaningless.
+#
+# Guards the propagation-window failure in kdex-tech/host-manager#161: an
+# install that quietly carries the previous version's content for a correctly
+# bumped pin, which npm exits 0 on and the packages image then freezes.
+echo "--- Verifying installed packages against the registry ---"
+run_cmd verify_integrity
+
 echo "--- Optimizing node_modules (runtime: ${RUNTIME}) ---"
 run_cmd optimize
 

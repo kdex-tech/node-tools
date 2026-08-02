@@ -3,7 +3,8 @@
   "bin": {
     "bundle_cjs": "./bundle_cjs",
     "generate": "./generate",
-    "optimize": "./optimize"
+    "optimize": "./optimize",
+    "verify_integrity": "./verify_integrity"
   },
   "dependencies": {
     "@jspm/generator": "^2.11.0",
