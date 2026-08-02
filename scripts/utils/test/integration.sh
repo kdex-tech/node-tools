@@ -5,9 +5,24 @@ set -e
 # Export local scripts to PATH for testing
 export PATH="$(pwd)/scripts/utils:$PATH"
 
+# Unit tests first: they are fast and pinpoint a broken unit, whereas an
+# integration failure only says "the flow broke somewhere". These were not
+# reached by `make test` before, so nothing ran them in CI.
+echo "--- Running unit tests ---"
+for unit_test in scripts/utils/test/*.test.js; do
+    [ -e "${unit_test}" ] || continue
+    echo "  -> ${unit_test}"
+    (cd scripts/utils && node "test/$(basename "${unit_test}")")
+done
+echo "--- Unit tests passed ---"
+
 # Mock /scripts/package.json
 mkdir -p /tmp/scripts_mock
-echo '{"name": "test-pkg", "dependencies": {"lit": "^3.3.2", "lodash-es": "^4.17.23", "preact": "^10.23.1"}}' > /tmp/scripts_mock/package.json
+# preact is pinned EXACTLY on purpose: it is the only dependency verify_integrity
+# will actually check (ranges are skipped), so this exercises the real
+# registry->tarball->installed-tree comparison against a genuinely published
+# package rather than only synthetic fixtures. See kdex-tech/host-manager#161.
+echo '{"name": "test-pkg", "dependencies": {"lit": "^3.3.2", "lodash-es": "^4.17.23", "preact": "10.23.1"}}' > /tmp/scripts_mock/package.json
 
 # Prepare test copy of get_modules with mock source path
 cp scripts/get_modules /tmp/get_modules_test
@@ -30,6 +45,15 @@ run_flow() {
     export WORKDIR="$(pwd)/test_workdir_${tag}"
     export PACKAGING_DIR="$(pwd)/test_packaging_dir_${tag}"
     export MODULE_PATH="/custom_node_modules"
+
+    # Start from a clean tree. Cleanup at the END of the flow is not enough: an
+    # interrupted run leaves a node_modules that `optimize` already rewrote in
+    # place, and the next run's installer sees the dependency as satisfied and
+    # keeps those bytes -- which verify_integrity then correctly reports as not
+    # matching the published tarball. Production is unaffected (the packager's
+    # WORKDIR is a per-Job EmptyDir), so this is a test-hygiene fix, not a
+    # behaviour change.
+    rm -rf "${WORKDIR}" "${PACKAGING_DIR}"
 
     echo "--- Running shell integration test: get_modules (${tag}) ---"
     /tmp/get_modules_test
