@@ -47,8 +47,37 @@ export async function optimize(targetDir = 'node_modules', options = {}) {
     const uniqueFiles = Array.from(new Set(files));
     console.log('Found ' + uniqueFiles.length + ' unique files to optimize.');
 
+    // esbuild writes outfile in place, and an in-place write FOLLOWS a hardlink.
+    // bun installs by hardlinking packages out of its global install cache, so
+    // optimizing in place rewrites the CACHE's copy too — every later install of
+    // that package then starts from already-optimized sources and is optimized
+    // again. With BUN_INSTALL_CACHE_DIR on a persistent volume (the packager's
+    // CacheClaim) that corruption outlives the Job and compounds per build.
+    //
+    // Giving the file its own inode first leaves the cache pristine. Only paths
+    // that are actually shared pay for the copy.
+    function breakHardLink(file) {
+        let stat;
+        try {
+            stat = fs.statSync(file);
+        } catch {
+            return;
+        }
+        if (stat.nlink <= 1) return;
+
+        const tmp = `${file}.optimize-unlink`;
+        try {
+            fs.copyFileSync(file, tmp);
+            fs.renameSync(tmp, file);
+        } catch (e) {
+            try { fs.rmSync(tmp, { force: true }); } catch { /* best effort */ }
+            throw e;
+        }
+    }
+
     async function optimizeFile(file) {
         try {
+            breakHardLink(file);
             await build({
                 entryPoints: [file],
                 bundle: false,
