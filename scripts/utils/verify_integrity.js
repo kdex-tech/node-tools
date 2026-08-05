@@ -1,8 +1,9 @@
-import { execFileSync } from 'child_process';
+import { execFile } from 'child_process';
 import crypto from 'crypto';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import { promisify } from 'util';
 import zlib from 'zlib';
 
 // Fetch-side integrity verification for the packages aggregation.
@@ -17,13 +18,19 @@ import zlib from 'zlib';
 // This runs right after install and asserts, per exactly-pinned dependency:
 //
 //   1. the installed package.json declares the pinned version;
-//   2. the registry's own metadata is self-consistent — a freshly fetched
-//      tarball hashes to the dist.shasum / dist.integrity the registry
-//      advertises for that version;
+//   2. the registry is self-consistent for that version — the tarball hashes
+//      to the dist.shasum / dist.integrity the registry advertises;
 //   3. the installed files match that verified tarball byte for byte.
 //
 // (3) is the check that actually catches the reported failure: (1) alone passes
 // when the right version's package.json sits on top of the wrong dist bytes.
+//
+// What gives the check its power is not that anything is downloaded twice, it
+// is the TEMPORAL GAP: the metadata read here is a second, LATER read than the
+// one the install used, so a propagation-window packument that has since been
+// corrected shows up as a changed dist digest. That gap belongs to the metadata
+// read alone, which is why it is the only part forced online — see npmPack and
+// the ledger below for what that buys.
 //
 // MUST run before `optimize`, which rewrites node_modules JS in place with
 // esbuild — after that, no installed file matches its published bytes.
@@ -47,16 +54,42 @@ export function isExactVersion(version) {
 // in step (1) instead, which is the part that matters.
 const CONTENT_COMPARE_EXCLUDE = new Set(['package.json']);
 
-function defaultExec(file, args, options = {}) {
-    return execFileSync(file, args, {
+const execFileAsync = promisify(execFile);
+
+// Asynchronous on purpose: a *Sync child-process call blocks the event loop, so
+// verifying several dependencies at once would still run them one at a time.
+export async function defaultExec(file, args, options = {}) {
+    const { stdout } = await execFileAsync(file, args, {
         encoding: 'utf8',
         maxBuffer: 64 * 1024 * 1024,
         ...options,
     });
+    return stdout;
+}
+
+// Run `worker` over every item with at most `limit` in flight, returning the
+// results in ITEM order however they finish — the report must not shuffle from
+// run to run just because a package answered quickly.
+async function mapWithConcurrency(items, limit, worker) {
+    const results = new Array(items.length);
+    let next = 0;
+    const runner = async () => {
+        for (let i = next++; i < items.length; i = next++) {
+            results[i] = await worker(items[i], i);
+        }
+    };
+    await Promise.all(
+        Array.from({ length: Math.max(1, Math.min(limit, items.length)) }, runner)
+    );
+    return results;
 }
 
 function sha1(buffer) {
     return crypto.createHash('sha1').update(buffer).digest('hex');
+}
+
+function sha256(buffer) {
+    return crypto.createHash('sha256').update(buffer).digest('hex');
 }
 
 // npm's dist.integrity is Subresource Integrity: "<alg>-<base64 digest>".
@@ -141,10 +174,86 @@ function stripPackagePrefix(name) {
     return clean.startsWith('package/') ? clean.slice('package/'.length) : null;
 }
 
+// --- verification ledger ------------------------------------------------
+//
+// The expensive half of this check is fetching, gunzipping and tar-parsing a
+// tarball whose contents can never change: npm forbids republishing a version,
+// so a (name, version, registry digest) triple is a permanent identity. Once
+// verified, recording the tarball's per-file digests lets a later Job re-run
+// step (3) — the byte comparison that actually catches #161 — against the
+// recording instead of the tarball.
+//
+// The entry is keyed on the digest the registry advertises RIGHT NOW, which is
+// what keeps this from weakening the guard. It cannot outlive its own premise:
+// if the registry ever advertises different bytes for the version — precisely
+// the propagation-window packument being corrected — the key misses and the
+// full path runs. An entry recorded from a bad window can never be consulted,
+// because whatever would invalidate it also changes the key.
+//
+// The metadata read is what supplies that key, so it stays online. It is a
+// second, LATER read than the one the install used, and that temporal gap is
+// the entire mechanism.
+
+/**
+ * Where the ledger lives, or null when no persistent cache is attached.
+ *
+ * host-manager mounts the packager's cache claim at /cache and advertises it
+ * through NPM_CONFIG_CACHE / BUN_INSTALL_CACHE_DIR; deriving the root from the
+ * npm cache's parent means this works against today's controller with no CRD
+ * or controller release. KDEX_CACHE_DIR is the explicit form for when one is
+ * added. Neither set (an empty CacheClaim) leaves every Job on the cold path,
+ * which is the correct degradation.
+ */
+export function resolveLedgerDir(env = process.env) {
+    if (env.KDEX_CACHE_DIR) return path.join(env.KDEX_CACHE_DIR, 'verify');
+    if (env.NPM_CONFIG_CACHE) return path.join(path.dirname(env.NPM_CONFIG_CACHE), 'verify');
+    return null;
+}
+
+function registryKey(meta) {
+    return meta?.dist?.shasum ? `sha1:${meta.dist.shasum}` : `sri:${meta.dist.integrity}`;
+}
+
+function ledgerEntryPath(ledgerDir, name, version) {
+    // Scoped names nest naturally ("@scope/pkg/1.0.0.json"); versions are
+    // filename-safe by construction, having passed isExactVersion.
+    return path.join(ledgerDir, name, `${version}.json`);
+}
+
+function readLedgerEntry(ledgerDir, name, version, key) {
+    if (!ledgerDir) return null;
+    try {
+        const entry = JSON.parse(fs.readFileSync(ledgerEntryPath(ledgerDir, name, version), 'utf8'));
+        // A key mismatch is the invalidation path, not an error: fall through
+        // and re-verify against the tarball the registry now advertises.
+        return entry?.key === key && entry.files ? entry : null;
+    } catch {
+        return null;
+    }
+}
+
+function writeLedgerEntry(ledgerDir, name, version, key, files) {
+    if (!ledgerDir) return;
+    try {
+        const target = ledgerEntryPath(ledgerDir, name, version);
+        fs.mkdirSync(path.dirname(target), { recursive: true });
+        // tmp + rename: packaging Jobs for the same host can overlap on the
+        // claim, and a half-written entry read by the other one would be a
+        // spurious build failure. Entries are immutable per key, so a racing
+        // writer produces identical bytes and the last rename simply wins.
+        const tmp = `${target}.${process.pid}.tmp`;
+        fs.writeFileSync(tmp, JSON.stringify({ name, version, key, files }));
+        fs.renameSync(tmp, target);
+    } catch {
+        // A cache that cannot be written is a lost optimisation, never a
+        // reason to fail an otherwise verified build.
+    }
+}
+
 // --- registry access ----------------------------------------------------
 
-function npmView(name, version, { exec, workdir }) {
-    const raw = exec('npm', [
+async function npmView(name, version, { exec, workdir }) {
+    const raw = await exec('npm', [
         'view', `${name}@${version}`, '--json', '--prefer-online',
     ], { cwd: workdir });
     const meta = JSON.parse(raw);
@@ -153,9 +262,17 @@ function npmView(name, version, { exec, workdir }) {
     return Array.isArray(meta) ? meta[meta.length - 1] : meta;
 }
 
-function npmPack(name, version, destDir, { exec, workdir }) {
-    const raw = exec('npm', [
-        'pack', `${name}@${version}`, '--json', '--prefer-online',
+// The tarball is trusted because it hashes to the FRESHLY fetched
+// dist.shasum/integrity, not because of where its bytes came from — content
+// addressing means a cached tarball cannot vouch for itself the way a cached
+// packument can. So the first fetch is allowed to hit the package-manager cache
+// that `npm install` has just populated in the same Job; only a digest mismatch
+// forces `preferOnline`, which is what separates a stale cache from a
+// self-inconsistent registry.
+async function npmPack(name, version, destDir, { exec, workdir, preferOnline = false }) {
+    const raw = await exec('npm', [
+        'pack', `${name}@${version}`, '--json',
+        ...(preferOnline ? ['--prefer-online'] : []),
         '--pack-destination', destDir,
     ], { cwd: workdir });
     const result = JSON.parse(raw);
@@ -169,6 +286,23 @@ function npmPack(name, version, destDir, { exec, workdir }) {
 
 // --- verification -------------------------------------------------------
 
+// Does this tarball hash to what the registry advertises for the version?
+// dist.shasum is preferred because every registry emits it; dist.integrity is
+// the modern fallback.
+function tarballDigest(tarball, meta) {
+    const expectedShasum = meta?.dist?.shasum;
+    if (expectedShasum) {
+        const actual = sha1(tarball);
+        return actual === expectedShasum
+            ? { ok: true }
+            : { ok: false, reason: `fetched tarball sha1 ${actual} != registry dist.shasum ${expectedShasum}` };
+    }
+    const expectedIntegrity = meta?.dist?.integrity;
+    return integrityMatches(tarball, expectedIntegrity)
+        ? { ok: true }
+        : { ok: false, reason: `fetched tarball does not match registry dist.integrity ${expectedIntegrity}` };
+}
+
 function readInstalledVersion(modulesDir, name) {
     const manifest = path.join(modulesDir, name, 'package.json');
     if (!fs.existsSync(manifest)) return null;
@@ -179,25 +313,35 @@ function readInstalledVersion(modulesDir, name) {
     }
 }
 
-function compareInstalledToTarball(modulesDir, name, entries) {
-    const installedRoot = path.join(modulesDir, name);
-    const differing = [];
-
+// The published tree reduced to { relative path -> digest }. This is both the
+// cold path's comparison basis and exactly what the ledger records, so the
+// warm and cold paths run the identical comparison over identical data.
+function tarballFileDigests(entries) {
+    const files = {};
     for (const [entryName, published] of entries) {
         const relative = stripPackagePrefix(entryName);
         if (relative === null || relative === '') continue;
         if (CONTENT_COMPARE_EXCLUDE.has(relative)) continue;
+        files[relative] = sha256(published);
+    }
+    return files;
+}
 
+function compareInstalledToDigests(modulesDir, name, files) {
+    const installedRoot = path.join(modulesDir, name);
+    const differing = [];
+
+    for (const [relative, published] of Object.entries(files)) {
         const installedPath = path.join(installedRoot, relative);
         if (!fs.existsSync(installedPath)) {
             differing.push({ file: relative, reason: 'missing from the installed tree' });
             continue;
         }
-        const installed = fs.readFileSync(installedPath);
-        if (!installed.equals(published)) {
+        const installed = sha256(fs.readFileSync(installedPath));
+        if (installed !== published) {
             differing.push({
                 file: relative,
-                reason: `content differs (published ${sha1(published).slice(0, 12)}, installed ${sha1(installed).slice(0, 12)})`,
+                reason: `content differs (published ${published.slice(0, 12)}, installed ${installed.slice(0, 12)})`,
             });
         }
     }
@@ -224,6 +368,10 @@ export async function verifyIntegrity(options = {}) {
         exec = defaultExec,
         log = console.log,
         tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kdex-verify-')),
+        ledgerDir = null,
+        // Bounded so a large dependency set cannot open an unreasonable number
+        // of registry connections at once; every unit here is one npm process.
+        concurrency = 8,
     } = options;
 
     let deps = options.deps;
@@ -232,83 +380,114 @@ export async function verifyIntegrity(options = {}) {
         deps = JSON.parse(fs.readFileSync(pkgPath, 'utf8')).dependencies ?? {};
     }
 
-    const checked = [];
-    const skipped = [];
-    const failures = [];
-    const unverified = [];
-
-    for (const [name, range] of Object.entries(deps)) {
+    // One dependency's verdict, tagged with the bucket it belongs in. Each
+    // package is independent, so this runs concurrently and the caller
+    // reassembles the buckets in dependency order afterwards.
+    const verifyOne = async ([name, range]) => {
         if (!isExactVersion(range)) {
-            skipped.push({ name, range, reason: 'not an exact version' });
-            continue;
+            return { bucket: 'skipped', entry: { name, range, reason: 'not an exact version' } };
         }
         const version = String(range).trim();
+        const fail = (reason) => ({ bucket: 'failures', entry: { name, version, reason } });
+        const cannotVerify = (reason) => ({ bucket: 'unverified', entry: { name, version, reason } });
 
         // (1) the installed tree declares the pinned version.
         const installedVersion = readInstalledVersion(modulesDir, name);
         if (installedVersion === null) {
-            failures.push({ name, version, reason: 'not present in node_modules after install' });
-            continue;
+            return fail('not present in node_modules after install');
         }
         if (installedVersion !== version) {
-            failures.push({
-                name, version,
-                reason: `installed version is ${installedVersion}, pinned ${version}`,
-            });
-            continue;
+            return fail(`installed version is ${installedVersion}, pinned ${version}`);
         }
 
         // (2) the registry is self-consistent for this version.
+        //
+        // The metadata read MUST stay online. It is a second, LATER read than
+        // the one the install used, and that temporal gap is the whole
+        // mechanism: a propagation-window packument that has since been
+        // corrected shows up here as a different dist digest.
         let meta;
-        let tarballPath;
         try {
-            meta = npmView(name, version, { exec, workdir });
-            tarballPath = npmPack(name, version, tmpDir, { exec, workdir });
+            meta = await npmView(name, version, { exec, workdir });
         } catch (err) {
-            unverified.push({ name, version, reason: `registry fetch failed: ${err.message}` });
-            continue;
+            return cannotVerify(`registry fetch failed: ${err.message}`);
         }
 
-        const tarball = fs.readFileSync(tarballPath);
-        const expectedShasum = meta?.dist?.shasum;
-        const expectedIntegrity = meta?.dist?.integrity;
+        if (!meta?.dist?.shasum && !meta?.dist?.integrity) {
+            return cannotVerify('registry metadata carries no dist.shasum or dist.integrity');
+        }
 
-        if (expectedShasum) {
-            const actual = sha1(tarball);
-            if (actual !== expectedShasum) {
-                failures.push({
-                    name, version,
-                    reason: `fetched tarball sha1 ${actual} != registry dist.shasum ${expectedShasum}`,
-                });
-                continue;
+        // A ledger entry recorded against the digest the registry is
+        // advertising right now already carries the published file digests, so
+        // the tarball round trip can be skipped entirely.
+        const key = registryKey(meta);
+        const cached = readLedgerEntry(ledgerDir, name, version, key);
+        let files = cached?.files;
+
+        if (!files) {
+            let tarball;
+            let digest;
+            try {
+                tarball = fs.readFileSync(await npmPack(name, version, tmpDir, { exec, workdir }));
+                digest = tarballDigest(tarball, meta);
+                if (!digest.ok) {
+                    // One mismatching fetch is not enough to blame the registry
+                    // — the package-manager cache may simply be holding the
+                    // wrong bytes. Re-fetch online; only if THAT still
+                    // disagrees is the registry itself inconsistent.
+                    tarball = fs.readFileSync(
+                        await npmPack(name, version, tmpDir, { exec, workdir, preferOnline: true })
+                    );
+                    digest = tarballDigest(tarball, meta);
+                }
+            } catch (err) {
+                return cannotVerify(`registry fetch failed: ${err.message}`);
             }
-        } else if (expectedIntegrity) {
-            if (!integrityMatches(tarball, expectedIntegrity)) {
-                failures.push({
-                    name, version,
-                    reason: `fetched tarball does not match registry dist.integrity ${expectedIntegrity}`,
-                });
-                continue;
+
+            if (!digest.ok) {
+                return fail(digest.reason);
             }
-        } else {
-            unverified.push({ name, version, reason: 'registry metadata carries no dist.shasum or dist.integrity' });
-            continue;
+
+            files = tarballFileDigests(readTarGz(tarball));
         }
 
         // (3) the installed files ARE the published files.
-        const entries = readTarGz(tarball);
-        const differing = compareInstalledToTarball(modulesDir, name, entries);
+        const differing = compareInstalledToDigests(modulesDir, name, files);
         if (differing.length > 0) {
             const preview = differing.slice(0, 5).map((d) => `${d.file} (${d.reason})`);
-            failures.push({
-                name, version,
-                reason: `installed content differs from the published ${version} tarball in ${differing.length} file(s): ${preview.join('; ')}${differing.length > 5 ? '; …' : ''}`,
-            });
-            continue;
+            return fail(
+                `installed content differs from the published ${version} tarball in ${differing.length} file(s): ` +
+                `${preview.join('; ')}${differing.length > 5 ? '; …' : ''}`
+            );
         }
 
-        checked.push({ name, version, files: entries.size });
-        log(`  ✓ ${name}@${version} matches the published tarball (${entries.size} entries)`);
+        // Recorded only once the package verified clean, so a failed check can
+        // never be handed to the next Job as an answer.
+        if (!cached) {
+            writeLedgerEntry(ledgerDir, name, version, key, files);
+        }
+
+        const count = Object.keys(files).length;
+        return {
+            bucket: 'checked',
+            entry: { name, version, files: count, cached: Boolean(cached) },
+            log: `  ✓ ${name}@${version} matches the published tarball (${count} entries${cached ? ', from cache' : ''})`,
+        };
+    };
+
+    const outcomes = await mapWithConcurrency(Object.entries(deps), concurrency, verifyOne);
+
+    const checked = [];
+    const skipped = [];
+    const failures = [];
+    const unverified = [];
+    const buckets = { checked, skipped, failures, unverified };
+
+    // Reassembled in dependency order, not completion order, so the report is
+    // reproducible run to run.
+    for (const outcome of outcomes) {
+        buckets[outcome.bucket].push(outcome.entry);
+        if (outcome.log) log(outcome.log);
     }
 
     for (const s of skipped) {

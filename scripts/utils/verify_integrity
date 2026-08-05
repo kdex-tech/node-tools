@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { verifyIntegrity } from './verify_integrity.js';
+import { resolveLedgerDir, verifyIntegrity } from './verify_integrity.js';
 
 // Exit non-zero on a CONFIRMED mismatch only. Packages that could not be
 // verified are reported and tolerated -- see verify_integrity.js for why
@@ -14,13 +14,23 @@ async function run() {
         return;
     }
 
+    // With a cache claim attached the ledger removes the tarball round trip for
+    // any (package, version) already verified by an earlier Job. Without one it
+    // is null and every Job pays the full cold path, exactly as before.
+    const ledgerDir = resolveLedgerDir();
+    if (ledgerDir) {
+        console.log(`--- Verification ledger: ${ledgerDir} ---`);
+    }
+
     const { checked, skipped, failures, unverified } = await verifyIntegrity({
         workdir: process.env.WORKDIR || process.cwd(),
+        ledgerDir,
     });
 
+    const fromCache = checked.filter((c) => c.cached).length;
     console.log(
-        `--- Integrity: ${checked.length} verified, ${skipped.length} skipped, ` +
-        `${unverified.length} unverified, ${failures.length} failed ---`
+        `--- Integrity: ${checked.length} verified (${fromCache} from ledger), ` +
+        `${skipped.length} skipped, ${unverified.length} unverified, ${failures.length} failed ---`
     );
 
     if (failures.length > 0) {

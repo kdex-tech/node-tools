@@ -42,3 +42,4 @@ node_modules/
 importmap.json
 test_workdir*/
 test_packaging_dir*/
+test_cache_dir/

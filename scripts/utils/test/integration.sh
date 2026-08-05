@@ -16,6 +16,12 @@ for unit_test in scripts/utils/test/*.test.js; do
 done
 echo "--- Unit tests passed ---"
 
+# The verification ledger persists on the packager's cache claim, which
+# host-manager mounts at /cache. Point it at a scratch dir so the flows below
+# exercise the real cold-then-warm path end to end against a live registry.
+export KDEX_CACHE_DIR="$(pwd)/test_cache_dir"
+rm -rf "${KDEX_CACHE_DIR}"
+
 # Mock /scripts/package.json
 mkdir -p /tmp/scripts_mock
 # preact is pinned EXACTLY on purpose: it is the only dependency verify_integrity
@@ -56,12 +62,39 @@ run_flow() {
     rm -rf "${WORKDIR}" "${PACKAGING_DIR}"
 
     echo "--- Running shell integration test: get_modules (${tag}) ---"
-    /tmp/get_modules_test
+    # Captured rather than piped: `sh` has no pipefail, so `cmd | tee` would
+    # report tee's status and a failed verification would pass silently.
+    if ! /tmp/get_modules_test > "/tmp/get_modules_${tag}.log" 2>&1; then
+        cat "/tmp/get_modules_${tag}.log"
+        echo "Fail: get_modules exited non-zero (${tag})"
+        exit 1
+    fi
+    cat "/tmp/get_modules_${tag}.log"
 
     if [ ! -f "${WORKDIR}/package.json" ]; then
         echo "Fail: package.json not copied to WORKDIR"
         exit 1
     fi
+
+    # preact is the only exact pin, so it is the only package verified — and
+    # therefore the only one recorded. The entry proves the ledger reached the
+    # claim through the real runner, not just the unit fixtures.
+    if [ ! -f "${KDEX_CACHE_DIR}/verify/preact/10.23.1.json" ]; then
+        echo "Fail: no ledger entry written for preact@10.23.1 (${tag})"
+        exit 1
+    fi
+
+    # The FIRST flow verifies cold; every later one must hit the ledger the
+    # earlier flow left behind. That is the whole point of putting it on the
+    # persistent claim, so assert it rather than assuming it.
+    if [ -n "${LEDGER_WARMED}" ]; then
+        if ! grep -q "preact@10.23.1 matches the published tarball.*from cache" "/tmp/get_modules_${tag}.log"; then
+            echo "Fail: preact was re-fetched despite a ledger entry from an earlier flow (${tag})"
+            exit 1
+        fi
+        echo "--- Ledger hit confirmed for ${tag} ---"
+    fi
+    LEDGER_WARMED=1
 
     echo "--- Running shell integration test: importmap_generator (${tag}) ---"
     ./scripts/importmap_generator
@@ -90,6 +123,12 @@ run_flow() {
 # Baseline: npm installer, node runtime (always available).
 run_flow npm node
 
+# Same flow again, against the ledger the first one left on the cache dir. Run
+# unconditionally: the bun/deno flows below would also prove the warm path, but
+# they are skipped wherever those runtimes are absent, and a warm-path assertion
+# that only runs on some machines is not an assertion.
+run_flow npm node
+
 # bun is optional: prove it as both an installer and a runtime when available.
 if command -v bun >/dev/null 2>&1; then
     run_flow bun node
@@ -108,7 +147,7 @@ else
 fi
 
 # Cleanup shared fixtures
-rm -rf /tmp/get_modules_test /tmp/scripts_mock
+rm -rf /tmp/get_modules_test /tmp/scripts_mock /tmp/get_modules_*.log "${KDEX_CACHE_DIR}"
 
 echo ""
 echo "--- Shell integration tests passed ---"
