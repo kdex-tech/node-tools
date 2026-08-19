@@ -1,10 +1,9 @@
-import { execFile } from 'child_process';
 import crypto from 'crypto';
 import fs from 'fs';
-import os from 'os';
 import path from 'path';
-import { promisify } from 'util';
 import zlib from 'zlib';
+
+import { fetchPackumentVersion, fetchTarball, loadNpmrc } from './registry_client.js';
 
 // Fetch-side integrity verification for the packages aggregation.
 //
@@ -53,19 +52,6 @@ export function isExactVersion(version) {
 // legitimately annotate the installed copy. Its `version` is checked directly
 // in step (1) instead, which is the part that matters.
 const CONTENT_COMPARE_EXCLUDE = new Set(['package.json']);
-
-const execFileAsync = promisify(execFile);
-
-// Asynchronous on purpose: a *Sync child-process call blocks the event loop, so
-// verifying several dependencies at once would still run them one at a time.
-export async function defaultExec(file, args, options = {}) {
-    const { stdout } = await execFileAsync(file, args, {
-        encoding: 'utf8',
-        maxBuffer: 64 * 1024 * 1024,
-        ...options,
-    });
-    return stdout;
-}
 
 // Run `worker` over every item with at most `limit` in flight, returning the
 // results in ITEM order however they finish — the report must not shuffle from
@@ -210,6 +196,71 @@ export function resolveLedgerDir(env = process.env) {
     return null;
 }
 
+/**
+ * How the ledger's state should read in the log.
+ *
+ * The null case is the "correct degradation" the comment above describes, but
+ * it was INVISIBLE degradation: a disabled ledger and a legitimately cold first
+ * run both surfaced as "(0 from ledger)", so a packager Job ran the full
+ * fetch/gunzip/tar-parse path for 33 generations -- 88% of its wall time --
+ * with nothing in the output pointing at the cause (node-tools#8).
+ */
+export function ledgerStatusLine(ledgerDir) {
+    return ledgerDir
+        ? `ledger: ${ledgerDir}`
+        : 'ledger: DISABLED — set KDEX_CACHE_DIR or NPM_CONFIG_CACHE to a persistent path';
+}
+
+/**
+ * The closing report: one summary line plus any warnings worth acting on.
+ *
+ * Separated from the runner so the wording of each state is directly testable;
+ * the states differ by one word in production and that word is the whole point.
+ */
+export function integritySummary({ checked, skipped, unverified, failures, ledgerDir }) {
+    const fromLedger = checked.filter((c) => c.cached).length;
+    const ledgerPart = ledgerDir ? `${fromLedger} from ledger` : 'ledger disabled';
+
+    const summary =
+        `--- Integrity: ${checked.length} verified (${ledgerPart}), ` +
+        `${skipped.length} skipped, ${unverified.length} unverified, ${failures.length} failed ---`;
+
+    const warnings = [];
+
+    // Only worth saying when something actually paid the cold path.
+    if (checked.length > 0) {
+        if (!ledgerDir) {
+            warnings.push(
+                `the verification ledger is disabled, so all ${checked.length} package(s) took the full ` +
+                'fetch/gunzip/tar-parse path and will do so on every future run — ' +
+                'set KDEX_CACHE_DIR (or NPM_CONFIG_CACHE) to a path on persistent storage'
+            );
+        } else if (fromLedger === 0) {
+            // A live dir that never hits is the same permanent cold path in
+            // disguise: the directory is not surviving between Jobs.
+            warnings.push(
+                `the ledger at ${ledgerDir} is readable but no entries were reused — ` +
+                'expected on a genuinely first run, otherwise the directory is not persisting between runs ' +
+                '(e.g. it resolves into an ephemeral volume)'
+            );
+        }
+    }
+
+    // "unverified" is not "failed", so without this the difference between
+    // "verified 24" and "verified 23, one we could never check" is a single
+    // digit in one line and an identical exit code (node-tools#9).
+    if (unverified.length > 0) {
+        warnings.push(
+            `${unverified.length} package(s) ended UNVERIFIED — they could not be checked at all, so they ` +
+            'ship with no verification: ' +
+            'the #161 propagation-window guard did not run for them; ' +
+            'set VERIFY_INTEGRITY_STRICT=1 to treat this as a build failure'
+        );
+    }
+
+    return { summary, warnings };
+}
+
 function registryKey(meta) {
     return meta?.dist?.shasum ? `sha1:${meta.dist.shasum}` : `sri:${meta.dist.integrity}`;
 }
@@ -252,37 +303,18 @@ function writeLedgerEntry(ledgerDir, name, version, key, files) {
 
 // --- registry access ----------------------------------------------------
 
-async function npmView(name, version, { exec, workdir }) {
-    const raw = await exec('npm', [
-        'view', `${name}@${version}`, '--json', '--prefer-online',
-    ], { cwd: workdir });
-    const meta = JSON.parse(raw);
-    // `npm view` yields an array when the selector matches multiple versions;
-    // an exact pin should not, but take the last if it does.
-    return Array.isArray(meta) ? meta[meta.length - 1] : meta;
-}
-
-// The tarball is trusted because it hashes to the FRESHLY fetched
-// dist.shasum/integrity, not because of where its bytes came from — content
-// addressing means a cached tarball cannot vouch for itself the way a cached
-// packument can. So the first fetch is allowed to hit the package-manager cache
-// that `npm install` has just populated in the same Job; only a digest mismatch
-// forces `preferOnline`, which is what separates a stale cache from a
-// self-inconsistent registry.
-async function npmPack(name, version, destDir, { exec, workdir, preferOnline = false }) {
-    const raw = await exec('npm', [
-        'pack', `${name}@${version}`, '--json',
-        ...(preferOnline ? ['--prefer-online'] : []),
-        '--pack-destination', destDir,
-    ], { cwd: workdir });
-    const result = JSON.parse(raw);
-    const filename = Array.isArray(result) ? result[0]?.filename : result?.filename;
-    if (!filename) {
-        throw new Error(`npm pack ${name}@${version} reported no filename`);
-    }
-    // npm has shipped both "<file>" and a path; normalise to the destination.
-    return path.join(destDir, path.basename(filename));
-}
+// Registry access lives in registry_client.js: the packument is read over
+// HTTPS and the tarball is fetched from the `dist.tarball` that packument
+// advertises. Nothing here reconstructs a URL, which is what used to break
+// verification against Artifact Registry (node-tools#9), and there is no npm
+// CLI process per dependency any more (node-tools#10).
+//
+// One semantic simplification falls out of it. The old path let the FIRST
+// tarball fetch hit the package-manager cache and only retried online on a
+// digest mismatch, so a stale cache could not be mistaken for an inconsistent
+// registry. A direct fetch has no such cache to be stale, so it is online by
+// construction: a digest mismatch now means the registry really is
+// self-inconsistent, and is reported as a failure on the first try.
 
 // --- verification -------------------------------------------------------
 
@@ -365,12 +397,17 @@ export async function verifyIntegrity(options = {}) {
     const {
         workdir = process.cwd(),
         modulesDir = path.join(workdir, 'node_modules'),
-        exec = defaultExec,
         log = console.log,
-        tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kdex-verify-')),
         ledgerDir = null,
+        // Resolved once per run, not per dependency: the npmrc the packager
+        // mounts is what tells us which registry each scope resolves from and
+        // which token may be sent to it.
+        registryConfig = loadNpmrc(workdir),
+        fetchImpl = fetch,
         // Bounded so a large dependency set cannot open an unreasonable number
-        // of registry connections at once; every unit here is one npm process.
+        // of registry connections at once. Each unit is now one HTTPS request
+        // rather than one npm process, so this is about the registry's
+        // tolerance rather than about local process pressure.
         concurrency = 8,
     } = options;
 
@@ -408,7 +445,7 @@ export async function verifyIntegrity(options = {}) {
         // corrected shows up here as a different dist digest.
         let meta;
         try {
-            meta = await npmView(name, version, { exec, workdir });
+            meta = await fetchPackumentVersion(name, version, { config: registryConfig, fetchImpl });
         } catch (err) {
             return cannotVerify(`registry fetch failed: ${err.message}`);
         }
@@ -425,21 +462,17 @@ export async function verifyIntegrity(options = {}) {
         let files = cached?.files;
 
         if (!files) {
+            // Follow the registry's own dist.tarball. Reconstructing this URL
+            // is what produced the 400 in node-tools#9.
+            if (!meta?.dist?.tarball) {
+                return cannotVerify('registry metadata carries no dist.tarball');
+            }
+
             let tarball;
             let digest;
             try {
-                tarball = fs.readFileSync(await npmPack(name, version, tmpDir, { exec, workdir }));
+                tarball = await fetchTarball(meta.dist.tarball, { config: registryConfig, fetchImpl });
                 digest = tarballDigest(tarball, meta);
-                if (!digest.ok) {
-                    // One mismatching fetch is not enough to blame the registry
-                    // — the package-manager cache may simply be holding the
-                    // wrong bytes. Re-fetch online; only if THAT still
-                    // disagrees is the registry itself inconsistent.
-                    tarball = fs.readFileSync(
-                        await npmPack(name, version, tmpDir, { exec, workdir, preferOnline: true })
-                    );
-                    digest = tarballDigest(tarball, meta);
-                }
             } catch (err) {
                 return cannotVerify(`registry fetch failed: ${err.message}`);
             }

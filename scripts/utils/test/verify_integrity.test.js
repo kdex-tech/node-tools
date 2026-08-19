@@ -5,7 +5,8 @@ import os from 'os';
 import path from 'path';
 import zlib from 'zlib';
 
-import { defaultExec, isExactVersion, readTarGz, resolveLedgerDir, verifyIntegrity } from '../verify_integrity.js';
+import { isExactVersion, readTarGz, resolveLedgerDir, verifyIntegrity } from '../verify_integrity.js';
+import { parseNpmrc } from '../registry_client.js';
 
 // --- fixtures -----------------------------------------------------------
 
@@ -65,31 +66,26 @@ function run(s, extra = {}) {
         workdir: s.root,
         modulesDir: s.modulesDir,
         deps: { 'demo-pkg': '0.1.6' },
-        exec: s.exec,
-        tmpDir: s.tmpDir,
+        fetchImpl: s.fetchImpl,
         log: quiet,
         ...extra,
     });
 }
 
-// An exec that fails loudly if the tarball is fetched at all — the assertion
+// A registry that fails loudly if the tarball is fetched at all — the assertion
 // that the ledger removed the expensive half of the check.
-function execWithoutPack(s) {
-    return (file, args) => {
-        if (args[0] === 'pack') {
+function fetchWithoutTarball(s) {
+    return async (url, init) => {
+        if (url.endsWith('.tgz')) {
             throw new Error('the tarball must not be fetched when the ledger already covers this version');
         }
-        return s.exec(file, args);
+        return s.fetchImpl(url, init);
     };
 }
 
-// Builds a workdir with an installed node_modules tree, plus a fake npm that
-// answers `view` from the registry metadata and `pack` with a prepared tarball.
-//
-// `staleCachedFiles` models a package-manager cache holding the WRONG bytes for
-// this version: a `pack` without --prefer-online serves those, one with it
-// serves the real tarball. That is the only way the two fetch modes are allowed
-// to differ, and it is what the cache-then-refetch path has to survive.
+// Builds a workdir with an installed node_modules tree, plus a fake registry
+// that serves a packument for the pinned version and the tarball it advertises
+// through dist.tarball.
 function scenario({ pinned, installedFiles, publishedFiles, installedVersion, staleCachedFiles }) {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'verify-test-'));
     const modulesDir = path.join(root, 'node_modules');
@@ -121,37 +117,47 @@ function scenario({ pinned, installedFiles, publishedFiles, installedVersion, st
         staleTarball = makeTarGz(staleFiles);
     }
 
-    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'verify-pack-'));
+    const TARBALL_URL = 'https://registry.example/demo-pkg/-/demo-pkg-' + pinned + '.tgz';
 
+    // A fake registry rather than a fake npm CLI: verification now reads the
+    // packument over HTTPS and follows its dist.tarball, so the seam under test
+    // is the HTTP layer (node-tools#9, #10).
     const calls = [];
-    const exec = (file, args) => {
-        calls.push(args);
-        assert.strictEqual(file, 'npm');
-        if (args[0] === 'view') {
-            assert.ok(args.includes('--prefer-online'),
-                'registry metadata must be fetched fresh, or a stale cache answers for itself');
-            return JSON.stringify({
-                name: 'demo-pkg',
-                version: pinned,
-                dist: { shasum: sha1(tarball), tarball: 'https://registry.example/demo-pkg.tgz' },
-            });
+    const fetchImpl = async (url, init = {}) => {
+        calls.push({ url, init });
+        if (url === TARBALL_URL) {
+            return {
+                ok: true,
+                status: 200,
+                headers: { get: () => null },
+                arrayBuffer: async () => tarball,
+            };
         }
-        if (args[0] === 'pack') {
-            const online = args.includes('--prefer-online');
-            const body = !online && staleTarball ? staleTarball : tarball;
-            const dest = args[args.indexOf('--pack-destination') + 1];
-            const filename = `demo-pkg-${pinned}.tgz`;
-            fs.writeFileSync(path.join(dest, filename), body);
-            return JSON.stringify([{ filename }]);
+        if (url.endsWith('/demo-pkg')) {
+            return {
+                ok: true,
+                status: 200,
+                headers: { get: () => null },
+                json: async () => ({
+                    name: 'demo-pkg',
+                    versions: {
+                        [pinned]: {
+                            name: 'demo-pkg',
+                            version: pinned,
+                            dist: { shasum: sha1(tarball), tarball: TARBALL_URL },
+                        },
+                    },
+                }),
+            };
         }
-        throw new Error(`unexpected npm invocation: ${args.join(' ')}`);
+        throw new Error(`unexpected registry request: ${url}`);
     };
 
-    return { root, modulesDir, exec, tmpDir, tarball, calls };
+    return { root, modulesDir, fetchImpl, tarball, calls, tarballUrl: TARBALL_URL };
 }
 
-const packCalls = (calls) => calls.filter((args) => args[0] === 'pack');
-const viewCalls = (calls) => calls.filter((args) => args[0] === 'view');
+const tarballCalls = (calls) => calls.filter((c) => c.url.endsWith('.tgz'));
+const metadataCalls = (calls) => calls.filter((c) => !c.url.endsWith('.tgz'));
 
 const quiet = () => {};
 
@@ -171,8 +177,7 @@ async function testCatchesStaleBytesUnderCorrectVersion() {
         workdir: s.root,
         modulesDir: s.modulesDir,
         deps: { 'demo-pkg': '0.1.6' },
-        exec: s.exec,
-        tmpDir: s.tmpDir,
+        fetchImpl: s.fetchImpl,
         log: quiet,
     });
 
@@ -197,8 +202,7 @@ async function testCleanInstallPasses() {
         workdir: s.root,
         modulesDir: s.modulesDir,
         deps: { 'demo-pkg': '0.1.6' },
-        exec: s.exec,
-        tmpDir: s.tmpDir,
+        fetchImpl: s.fetchImpl,
         log: quiet,
     });
 
@@ -220,8 +224,7 @@ async function testCatchesWrongInstalledVersion() {
         workdir: s.root,
         modulesDir: s.modulesDir,
         deps: { 'demo-pkg': '0.1.6' },
-        exec: s.exec,
-        tmpDir: s.tmpDir,
+        fetchImpl: s.fetchImpl,
         log: quiet,
     });
 
@@ -239,28 +242,39 @@ async function testCatchesRegistryShasumMismatch() {
         publishedFiles: { 'dist/index.js': 'x' },
     });
 
-    const exec = (file, args) => {
-        if (args[0] === 'view') {
-            return JSON.stringify({ dist: { shasum: 'deadbeef'.repeat(5) } }); // wrong on purpose
+    const fetchImpl = async (url, init) => {
+        if (!url.endsWith('.tgz')) {
+            return {
+                ok: true, status: 200, headers: { get: () => null },
+                json: async () => ({
+                    versions: {
+                        '0.1.6': {
+                            version: '0.1.6',
+                            // wrong on purpose
+                            dist: { shasum: 'deadbeef'.repeat(5), tarball: s.tarballUrl },
+                        },
+                    },
+                }),
+            };
         }
-        return s.exec(file, args);
+        return s.fetchImpl(url, init);
     };
 
     const result = await verifyIntegrity({
         workdir: s.root,
         modulesDir: s.modulesDir,
         deps: { 'demo-pkg': '0.1.6' },
-        exec,
-        tmpDir: s.tmpDir,
+        fetchImpl,
         log: quiet,
     });
 
     assert.strictEqual(result.failures.length, 1);
     assert.match(result.failures[0].reason, /!= registry dist\.shasum/);
-    // Only after an online re-fetch also disagrees is the REGISTRY the culprit;
-    // a single mismatching fetch could just be a stale package-manager cache.
-    assert.strictEqual(packCalls(s.calls).length, 2,
-        'the registry may only be blamed once an online re-fetch also mismatches');
+    // The fetch is online by construction now — there is no package-manager
+    // cache in this path to blame — so one disagreeing read is enough to
+    // convict the registry, and it must not be retried.
+    assert.strictEqual(tarballCalls(s.calls).length, 1,
+        'a direct tarball fetch must not be retried: it was never cached');
     console.log('--- registry-shasum-mismatch test passed ---');
 }
 
@@ -280,7 +294,6 @@ async function testUnreachableRegistryIsNotAFailure() {
         modulesDir: s.modulesDir,
         deps: { 'demo-pkg': '0.1.6' },
         exec,
-        tmpDir: s.tmpDir,
         log: quiet,
     });
 
@@ -303,7 +316,6 @@ async function testSkipsNonExactPins() {
         modulesDir: s.modulesDir,
         deps: { 'demo-pkg': '^0.1.0' },
         exec: () => { throw new Error('the registry must not be consulted for a range'); },
-        tmpDir: s.tmpDir,
         log: quiet,
     });
 
@@ -312,17 +324,20 @@ async function testSkipsNonExactPins() {
     console.log('--- non-exact-pin skip test passed ---');
 }
 
-// --- slice A: the tarball may come from the cache ------------------------
+// --- slice A: where the bytes come from ---------------------------------
 //
-// What gives this check its power is the TEMPORAL GAP: `npm view` is a second,
-// LATER registry read than the one the install used, so a propagation-window
-// packument that has since been corrected shows up as a changed integrity.
-// That gap is a property of the metadata read alone. The tarball is only a
-// source of bytes, and it is trusted solely because it hashes to the
-// freshly-fetched dist.shasum -- content addressing means a cached tarball
-// cannot vouch for itself. Forcing it online only re-downloads what `npm
-// install` just wrote to the package-manager cache.
-async function testTarballIsFetchedFromCacheButMetadataStaysOnline() {
+// What gives this check its power is the TEMPORAL GAP: the packument read is a
+// second, LATER registry read than the one the install used, so a
+// propagation-window packument that has since been corrected shows up as a
+// changed digest. That gap belongs to the metadata read, which is why it is
+// sent with no-cache.
+//
+// The tarball is only a source of bytes, trusted solely because it hashes to
+// the freshly-read dist.shasum. What matters about it is WHERE it is fetched
+// from: reconstructing that URL is what broke verification against Artifact
+// Registry in node-tools#9, so it must come from the packument's own
+// dist.tarball and nowhere else.
+async function testTarballComesFromTheAdvertisedUrl() {
     const body = 'export const v = "0.1.6";';
     const s = scenario({
         pinned: '0.1.6',
@@ -330,48 +345,45 @@ async function testTarballIsFetchedFromCacheButMetadataStaysOnline() {
         publishedFiles: { 'dist/index.js': body },
     });
 
-    await verifyIntegrity({
-        workdir: s.root,
-        modulesDir: s.modulesDir,
-        deps: { 'demo-pkg': '0.1.6' },
-        exec: s.exec,
-        tmpDir: s.tmpDir,
-        log: quiet,
-    });
+    const result = await run(s);
+    assert.deepStrictEqual(result.failures, []);
 
-    assert.ok(viewCalls(s.calls).every((args) => args.includes('--prefer-online')),
+    const tarballs = tarballCalls(s.calls);
+    assert.strictEqual(tarballs.length, 1);
+    assert.strictEqual(tarballs[0].url, s.tarballUrl,
+        'the tarball must be fetched from the URL the registry advertised, never a constructed one');
+
+    const metadata = metadataCalls(s.calls);
+    assert.ok(metadata.length >= 1);
+    assert.match(String(metadata[0].init.headers['Cache-Control'] ?? ''), /no-cache/,
         'metadata must stay online: it is the later registry read the check depends on');
-    assert.strictEqual(packCalls(s.calls)[0].includes('--prefer-online'), false,
-        'the first tarball fetch must be allowed to hit the package-manager cache');
-    console.log('--- tarball-from-cache test passed ---');
+    console.log('--- tarball-from-advertised-url test passed ---');
 }
 
-// A cache that holds the wrong bytes must not be reported as a self-inconsistent
-// REGISTRY. Re-fetch online before drawing that conclusion.
-async function testStaleCachedTarballIsRefetchedOnline() {
-    const body = 'export const v = "0.1.6";';
+// A package whose metadata carries no dist.tarball cannot be checked, and that
+// is "could not verify" rather than a failure — the same class as an
+// unreachable registry.
+async function testMissingTarballUrlIsUnverified() {
     const s = scenario({
         pinned: '0.1.6',
-        installedFiles: { 'dist/index.js': body },
-        publishedFiles: { 'dist/index.js': body },
-        staleCachedFiles: { 'dist/index.js': 'export const v = "0.1.5";' },
+        installedFiles: { 'dist/index.js': 'x' },
+        publishedFiles: { 'dist/index.js': 'x' },
     });
 
-    const result = await verifyIntegrity({
-        workdir: s.root,
-        modulesDir: s.modulesDir,
-        deps: { 'demo-pkg': '0.1.6' },
-        exec: s.exec,
-        tmpDir: s.tmpDir,
-        log: quiet,
+    const result = await run(s, {
+        fetchImpl: async (url) => {
+            if (url.endsWith('.tgz')) throw new Error('must not be reached');
+            return {
+                ok: true, status: 200, headers: { get: () => null },
+                json: async () => ({ versions: { '0.1.6': { dist: { shasum: 'abc' } } } }),
+            };
+        },
     });
 
-    assert.deepStrictEqual(result.failures, [],
-        'a stale CACHE must not be reported as a failure when the registry is fine');
-    assert.strictEqual(result.checked.length, 1);
-    assert.strictEqual(packCalls(s.calls).length, 2, 'the mismatching fetch must be retried online');
-    assert.strictEqual(packCalls(s.calls)[1].includes('--prefer-online'), true);
-    console.log('--- stale-cached-tarball-refetch test passed ---');
+    assert.deepStrictEqual(result.failures, []);
+    assert.strictEqual(result.unverified.length, 1);
+    assert.match(result.unverified[0].reason, /dist\.tarball/);
+    console.log('--- missing-dist-tarball test passed ---');
 }
 
 // --- slice B: the verification ledger on the persistent cache ------------
@@ -417,12 +429,12 @@ async function testWarmLedgerSkipsTheTarballFetch() {
     await run(cleanScenario(), { ledgerDir });
 
     const warm = cleanScenario();
-    const result = await run(warm, { ledgerDir, exec: execWithoutPack(warm) });
+    const result = await run(warm, { ledgerDir, fetchImpl: fetchWithoutTarball(warm) });
 
     assert.deepStrictEqual(result.failures, []);
     assert.strictEqual(result.checked.length, 1, 'a ledger hit still counts as verified');
-    assert.strictEqual(packCalls(warm.calls).length, 0);
-    assert.strictEqual(viewCalls(warm.calls).length, 1,
+    assert.strictEqual(tarballCalls(warm.calls).length, 0);
+    assert.strictEqual(metadataCalls(warm.calls).length, 1,
         'the metadata read stays — it is what proves the ledger entry is still the published one');
     console.log('--- warm-ledger-skips-tarball test passed ---');
 }
@@ -438,7 +450,7 @@ async function testLedgerEntryForOtherBytesIsIgnored() {
 
     assert.deepStrictEqual(result.failures, [],
         'the registry and the install agree on the new bytes; only the stale entry disagreed');
-    assert.strictEqual(packCalls(corrected.calls).length, 1,
+    assert.strictEqual(tarballCalls(corrected.calls).length, 1,
         'a key miss must fall through to the full tarball comparison');
 
     const entry = JSON.parse(fs.readFileSync(path.join(ledgerDir, 'demo-pkg', '0.1.6.json'), 'utf8'));
@@ -453,7 +465,7 @@ async function testWarmLedgerStillCatchesStaleInstalledBytes() {
     await run(s, { ledgerDir });
 
     fs.writeFileSync(path.join(s.modulesDir, 'demo-pkg', 'dist/index.js'), 'export const v = "0.1.5";');
-    const result = await run(s, { ledgerDir, exec: execWithoutPack(s) });
+    const result = await run(s, { ledgerDir, fetchImpl: fetchWithoutTarball(s) });
 
     assert.strictEqual(result.failures.length, 1,
         'stale installed bytes must fail on the ledger path exactly as on the cold path');
@@ -475,7 +487,7 @@ async function testUnreadableLedgerEntryFallsBackToTheColdPath() {
     const result = await run(s, { ledgerDir });
 
     assert.deepStrictEqual(result.failures, []);
-    assert.strictEqual(packCalls(s.calls).length, 1, 'an unreadable entry must fall through to the tarball');
+    assert.strictEqual(tarballCalls(s.calls).length, 1, 'an unreadable entry must fall through to the tarball');
     assert.strictEqual(JSON.parse(fs.readFileSync(target, 'utf8')).key, `sha1:${sha1(s.tarball)}`,
         'and the entry must be repaired on the way out');
     console.log('--- unreadable-ledger-entry test passed ---');
@@ -509,7 +521,6 @@ async function testFailedVerificationWritesNoLedgerEntry() {
 function concurrentScenario(count) {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'verify-conc-'));
     const modulesDir = path.join(root, 'node_modules');
-    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'verify-conc-pack-'));
     const deps = {};
     const tarballs = {};
 
@@ -530,25 +541,39 @@ function concurrentScenario(count) {
     let inFlight = 0;
     let maxInFlight = 0;
 
-    const exec = async (file, args) => {
+    const tarballUrl = (name) => `https://registry.example/${name}/-/${name}-1.0.0.tgz`;
+
+    const fetchImpl = async (url) => {
         inFlight += 1;
         maxInFlight = Math.max(maxInFlight, inFlight);
         try {
-            const name = String(args[1]).split('@')[0];
+            const name = url.match(/pkg-\d+/)[0];
+            // Later packages answer FASTER, so completion order differs from
+            // dependency order and the report's ordering is actually tested.
             await new Promise((resolve) => setTimeout(resolve, (count - Number(name.slice(4))) * 2));
-            if (args[0] === 'view') {
-                return JSON.stringify({ name, version: '1.0.0', dist: { shasum: sha1(tarballs[name]) } });
+            if (url.endsWith('.tgz')) {
+                return {
+                    ok: true, status: 200, headers: { get: () => null },
+                    arrayBuffer: async () => tarballs[name],
+                };
             }
-            const dest = args[args.indexOf('--pack-destination') + 1];
-            const filename = `${name}-1.0.0.tgz`;
-            fs.writeFileSync(path.join(dest, filename), tarballs[name]);
-            return JSON.stringify([{ filename }]);
+            return {
+                ok: true, status: 200, headers: { get: () => null },
+                json: async () => ({
+                    versions: {
+                        '1.0.0': {
+                            version: '1.0.0',
+                            dist: { shasum: sha1(tarballs[name]), tarball: tarballUrl(name) },
+                        },
+                    },
+                }),
+            };
         } finally {
             inFlight -= 1;
         }
     };
 
-    return { root, modulesDir, tmpDir, deps, exec, maxInFlight: () => maxInFlight };
+    return { root, modulesDir, deps, fetchImpl, maxInFlight: () => maxInFlight };
 }
 
 async function testDependenciesAreVerifiedConcurrently() {
@@ -558,8 +583,7 @@ async function testDependenciesAreVerifiedConcurrently() {
         workdir: c.root,
         modulesDir: c.modulesDir,
         deps: c.deps,
-        exec: c.exec,
-        tmpDir: c.tmpDir,
+        fetchImpl: c.fetchImpl,
         log: quiet,
         concurrency: 3,
     });
@@ -574,19 +598,6 @@ async function testDependenciesAreVerifiedConcurrently() {
     // order rather than completion order — the log must not shuffle run to run.
     assert.deepStrictEqual(result.checked.map((c2) => c2.name), Object.keys(c.deps));
     console.log('--- concurrent-verification test passed ---');
-}
-
-// Concurrency buys nothing if the default exec blocks the event loop, which is
-// exactly what a *Sync child-process call does.
-async function testDefaultExecDoesNotBlockTheEventLoop() {
-    const order = [];
-    const finished = defaultExec('sh', ['-c', 'exit 0']).then(() => order.push('exec'));
-    setImmediate(() => order.push('loop'));
-    await finished;
-
-    assert.deepStrictEqual(order, ['loop', 'exec'],
-        'the default exec must yield to the event loop, or the deps run serially anyway');
-    console.log('--- default-exec-is-async test passed ---');
 }
 
 function testIsExactVersion() {
@@ -638,8 +649,8 @@ const TESTS = [
     testCleanInstallPasses,
     testCatchesStaleBytesUnderCorrectVersion,
     testCatchesWrongInstalledVersion,
-    testTarballIsFetchedFromCacheButMetadataStaysOnline,
-    testStaleCachedTarballIsRefetchedOnline,
+    testTarballComesFromTheAdvertisedUrl,
+    testMissingTarballUrlIsUnverified,
     testCatchesRegistryShasumMismatch,
     testUnreachableRegistryIsNotAFailure,
     testSkipsNonExactPins,
@@ -651,7 +662,6 @@ const TESTS = [
     testUnreadableLedgerEntryFallsBackToTheColdPath,
     testFailedVerificationWritesNoLedgerEntry,
     testDependenciesAreVerifiedConcurrently,
-    testDefaultExecDoesNotBlockTheEventLoop,
 ];
 
 async function main() {

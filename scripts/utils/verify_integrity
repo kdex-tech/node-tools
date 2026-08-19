@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { resolveLedgerDir, verifyIntegrity } from './verify_integrity.js';
+import { integritySummary, ledgerStatusLine, resolveLedgerDir, verifyIntegrity } from './verify_integrity.js';
 
 // Exit non-zero on a CONFIRMED mismatch only. Packages that could not be
 // verified are reported and tolerated -- see verify_integrity.js for why
@@ -16,22 +16,39 @@ async function run() {
 
     // With a cache claim attached the ledger removes the tarball round trip for
     // any (package, version) already verified by an earlier Job. Without one it
-    // is null and every Job pays the full cold path, exactly as before.
+    // is null and every Job pays the full cold path.
+    //
+    // Logged UNCONDITIONALLY, including the null case: that state is the
+    // correct degradation but it used to be a silent one, and it cost a prod
+    // Job 88% of its wall time across 33 generations (node-tools#8).
     const ledgerDir = resolveLedgerDir();
-    if (ledgerDir) {
-        console.log(`--- Verification ledger: ${ledgerDir} ---`);
-    }
+    console.log(`--- Verification ${ledgerStatusLine(ledgerDir)} ---`);
 
     const { checked, skipped, failures, unverified } = await verifyIntegrity({
         workdir: process.env.WORKDIR || process.cwd(),
         ledgerDir,
     });
 
-    const fromCache = checked.filter((c) => c.cached).length;
-    console.log(
-        `--- Integrity: ${checked.length} verified (${fromCache} from ledger), ` +
-        `${skipped.length} skipped, ${unverified.length} unverified, ${failures.length} failed ---`
-    );
+    const { summary, warnings } = integritySummary({
+        checked, skipped, unverified, failures, ledgerDir,
+    });
+    console.log(summary);
+    for (const warning of warnings) {
+        console.warn(`  ! ${warning}`);
+    }
+
+    // Opt-in only. "could not check" still must not fail a build by default --
+    // a registry blip would be worse than the bug this guards against -- but a
+    // pipeline that wants the guard to be load-bearing needs a way to say so
+    // (node-tools#9).
+    if (process.env.VERIFY_INTEGRITY_STRICT === '1' && unverified.length > 0) {
+        console.error('');
+        console.error('Refusing to aggregate: VERIFY_INTEGRITY_STRICT=1 and some packages could not be verified:');
+        for (const u of unverified) {
+            console.error(`  ? ${u.name}@${u.version}: ${u.reason}`);
+        }
+        process.exit(1);
+    }
 
     if (failures.length > 0) {
         console.error('');
