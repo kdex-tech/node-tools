@@ -4,9 +4,16 @@ FROM node:24-alpine
 ARG TARGETARCH
 # Bun version to install. Bump here to upgrade.
 ARG BUN_VERSION=1.3.11
+# npm version to install over the base image's. npm 12 (pacote 22) is the
+# first whose git-dependency preparation honours --ignore-scripts: npm 11
+# ran a git dependency's prepare/install scripts regardless
+# (kdex-tech/host-manager#290). Bump here to upgrade.
+ARG NPM_VERSION=12.2.2
 
 # libstdc++ / libgcc are the runtime libs the musl bun build links against.
 RUN apk add --no-cache curl jq tree unzip libstdc++ libgcc
+
+RUN npm install -g "npm@${NPM_VERSION}" && npm --version
 
 # Install bun matching the image architecture. The image is Alpine (musl), so
 # pull the musl build; use the baseline x64 build for portability across CPUs

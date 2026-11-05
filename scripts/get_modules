@@ -67,6 +67,9 @@ INSTALLER="${INSTALLER:-npm}"
 # needed to produce the files served, and every one is third-party code that
 # would otherwise run beside this pod's credentials (the npm Secret, the image
 # push config). See kdex-tech/host-manager#290.
+# Also through the environment, which every child npm inherits: the
+# installer that prepares a git dependency is a separate npm process.
+export npm_config_ignore_scripts=true
 echo "--- Installing dependencies with ${INSTALLER} (lifecycle scripts disabled) ---"
 case "${INSTALLER}" in
   npm)
